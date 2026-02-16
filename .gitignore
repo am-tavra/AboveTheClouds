@@ -1,0 +1,6 @@
+build/
+above_the_clouds
+*.o
+*.a
+*.dylib
+.DS_Store
