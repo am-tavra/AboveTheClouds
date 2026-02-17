@@ -256,7 +256,9 @@ void DrawAtmosphere(Camera2D camera, int screenWidth, int screenHeight);
 void UpdateParticles(Particle *particles, int count, float deltaTime);
 void DrawParticles(Particle *particles, int count);
 void DrawPickupEffect(PickupEffect *effect, Camera2D camera);
-void DrawInventoryScreen(InventorySlot *inventory, int maxInv);
+void DrawInventoryScreen(InventorySlot *inventory, int maxInv,
+                         int *inventoryTab, int dataLogsPurchased,
+                         bool *dataLogViewerOpen, int *dataLogViewerIndex);
 void DrawHUD(InventorySlot *inventory, int screenWidth, int maxInv, int tokenCount, float tokenAnimTimer, int tokenAnimDelta);
 void DrawParallaxDunes(ParallaxDune *dunes, int count, Camera2D camera,
                        int screenWidth, int screenHeight);
@@ -466,6 +468,7 @@ int main(void)
 
     // Inventory screen toggle
     bool inventoryOpen = false;
+    int  inventoryTab  = 0;    // 0 = ITEMS, 1 = LOGS
 
     // Animation timers
     float walkTimer   = 0.0f;   // increments when moving, used for walk bob
@@ -998,7 +1001,9 @@ int main(void)
 
         // Inventory screen overlay
         if (inventoryOpen) {
-            DrawInventoryScreen(inventory, maxInventory);
+            DrawInventoryScreen(inventory, maxInventory,
+                                &inventoryTab, dataLogsPurchased,
+                                &dataLogViewerOpen, &dataLogViewerIndex);
         }
 
         // Workbench UI overlay
@@ -1843,7 +1848,9 @@ void DrawPickupEffect(PickupEffect *effect, Camera2D camera)
 // ---------------------------------------------------------------------------
 // DrawInventoryScreen
 // ---------------------------------------------------------------------------
-void DrawInventoryScreen(InventorySlot *inventory, int maxInv)
+void DrawInventoryScreen(InventorySlot *inventory, int maxInv,
+                         int *inventoryTab, int dataLogsPurchased,
+                         bool *dataLogViewerOpen, int *dataLogViewerIndex)
 {
     int sw = GetScreenWidth();
     int sh = GetScreenHeight();
@@ -1851,10 +1858,13 @@ void DrawInventoryScreen(InventorySlot *inventory, int maxInv)
     // Semi-transparent overlay
     DrawRectangle(0, 0, sw, sh, (Color){ 26, 26, 46, 200 });
 
-    // Panel — height adjusts for maxInv
-    int panelW = 520;
+    // Panel — fixed height to accommodate both tabs comfortably
+    int panelW = 560;
     int panelH = 82 + maxInv * 44 + 30;
-    if (panelH < 480) panelH = 480;
+    if (panelH < 500) panelH = 500;
+    // Logs tab needs 5*64 + padding = 370 at minimum; add header space
+    int logsNeeded = 46 + 34 + 10 + 5 * 64 + 30; // title + tabs + padding + rows + footer
+    if (panelH < logsNeeded) panelH = logsNeeded;
     int panelX = sw / 2 - panelW / 2;
     int panelY = sh / 2 - panelH / 2;
     int pad    = 12;
@@ -1868,83 +1878,257 @@ void DrawInventoryScreen(InventorySlot *inventory, int maxInv)
     DrawText(title, panelX + panelW / 2 - titleW / 2, panelY + pad + 4, 28,
              COL_UI_HEADER);
 
-    // Divider
-    DrawLine(panelX + pad, panelY + 54,
-             panelX + panelW - pad, panelY + 54, COL_UI_BORDER);
+    // Divider below title
+    DrawLine(panelX + pad, panelY + 50,
+             panelX + panelW - pad, panelY + 50, COL_UI_BORDER);
 
-    // Column headers
-    DrawText("ITEM",      panelX + pad + 8,  panelY + 62, 13, COL_UI_DIM);
-    DrawText("TYPE",      panelX + 220,       panelY + 62, 13, COL_UI_DIM);
-    DrawText("CONDITION", panelX + 340,       panelY + 62, 13, COL_UI_DIM);
+    // --- TAB BUTTONS ---
+    int tabY   = panelY + 56;
+    int tabH   = 34;
+    int tabW   = 120;
+    int tabGap = 8;
+    int tabsStartX = panelX + panelW / 2 - (tabW * 2 + tabGap) / 2;
 
-    int rowH   = 44;
-    int startY = panelY + 82;
+    Vector2 mouse   = GetMousePosition();
+    bool    clicked = IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
 
-    for (int i = 0; i < maxInv; i++) {
-        int rowY = startY + i * rowH;
+    for (int t = 0; t < 2; t++) {
+        int tx = tabsStartX + t * (tabW + tabGap);
+        bool isActive = (*inventoryTab == t);
+        bool hover    = (mouse.x >= tx && mouse.x < tx + tabW &&
+                         mouse.y >= tabY && mouse.y < tabY + tabH);
 
-        // Entry divider line
-        if (i > 0) {
-            DrawLine(panelX + pad, rowY - 1,
-                     panelX + panelW - pad, rowY - 1, COL_DIVIDER);
+        Color tabBg     = isActive ? (Color){ 60, 50, 40, 220 } :
+                         (hover    ? (Color){ 40, 32, 24, 200 } :
+                                     (Color){ 30, 25, 20, 180 });
+        Color tabBorder = isActive ? (Color){ 212, 165, 116, 255 } :
+                                     (Color){ 80, 70, 60, 255 };
+        Color tabText   = isActive ? (Color){ 212, 165, 116, 255 } :
+                                     (Color){ 140, 130, 120, 255 };
+
+        DrawRectangle(tx, tabY, tabW, tabH, tabBg);
+        DrawRectangleLines(tx, tabY, tabW, tabH, tabBorder);
+
+        const char *tabLabel = (t == 0) ? "ITEMS" : "LOGS";
+        int tlW = MeasureText(tabLabel, 14);
+        DrawText(tabLabel, tx + tabW / 2 - tlW / 2, tabY + tabH / 2 - 7, 14, tabText);
+
+        if (hover && clicked) {
+            *inventoryTab = t;
         }
+    }
 
-        if (inventory[i].occupied) {
-            const ItemTypeDef *def = &ITEM_TYPES[inventory[i].typeIndex];
-            float cond = inventory[i].condition;
+    int contentY = tabY + tabH + 8;
 
-            // TRADE: gold border around row if condition >= 0.8
-            if (cond >= 0.8f) {
-                DrawRectangleLines(panelX + pad - 2, rowY + 2,
-                                   panelW - pad * 2 + 4, rowH - 4,
-                                   (Color){ 212, 165, 116, 255 });
+    // ---------------------------------------------------------------
+    // TAB 0: ITEMS
+    // ---------------------------------------------------------------
+    if (*inventoryTab == 0) {
+        // Column headers
+        DrawText("ITEM",      panelX + pad + 8,  contentY, 13, COL_UI_DIM);
+        DrawText("TYPE",      panelX + 230,       contentY, 13, COL_UI_DIM);
+        DrawText("CONDITION", panelX + 350,       contentY, 13, COL_UI_DIM);
+
+        int rowH   = 44;
+        int startY = contentY + 18;
+
+        for (int i = 0; i < maxInv; i++) {
+            int rowY = startY + i * rowH;
+
+            // Entry divider line
+            if (i > 0) {
+                DrawLine(panelX + pad, rowY - 1,
+                         panelX + panelW - pad, rowY - 1, COL_DIVIDER);
             }
 
-            // Color swatch
-            DrawRectangle(panelX + pad, rowY + 6, 12, 12, def->color);
-            DrawRectangleLines(panelX + pad, rowY + 6, 12, 12,
-                              (Color){ 255, 255, 255, 40 });
+            if (inventory[i].occupied) {
+                const ItemTypeDef *def = &ITEM_TYPES[inventory[i].typeIndex];
+                float cond = inventory[i].condition;
 
-            // Item name
-            DrawText(def->name, panelX + pad + 18, rowY + 8, 16, COL_UI_TEXT);
+                // TRADE: gold border around row if condition >= 0.8
+                if (cond >= 0.8f) {
+                    DrawRectangleLines(panelX + pad - 2, rowY + 2,
+                                       panelW - pad * 2 + 4, rowH - 4,
+                                       (Color){ 212, 165, 116, 255 });
+                }
 
-            // Category
-            DrawText(def->categoryName, panelX + 220, rowY + 8, 13,
-                     (Color){ 180, 200, 180, 255 });
+                // Color swatch
+                DrawRectangle(panelX + pad, rowY + 6, 12, 12, def->color);
+                DrawRectangleLines(panelX + pad, rowY + 6, 12, 12,
+                                  (Color){ 255, 255, 255, 40 });
 
-            // Condition bar
-            int barX        = panelX + 340;
-            int barY        = rowY + 10;
-            int barMaxW     = 100;
-            int barH        = 10;
-            int barFillW    = (int)(cond * barMaxW);
+                // Item name
+                DrawText(def->name, panelX + pad + 18, rowY + 8, 16, COL_UI_TEXT);
 
-            DrawRectangle(barX, barY, barMaxW, barH, (Color){ 40, 40, 56, 255 });
+                // Category
+                DrawText(def->categoryName, panelX + 230, rowY + 8, 13,
+                         (Color){ 180, 200, 180, 255 });
 
-            Color barColor;
-            if (cond < 0.5f) {
-                barColor = (Color){ 200, 60, 60, 255 };
-            } else if (cond < 0.8f) {
-                barColor = (Color){ 220, 180, 40, 255 };
+                // Condition bar
+                int barX     = panelX + 350;
+                int barY     = rowY + 10;
+                int barMaxW  = 100;
+                int barH2    = 10;
+                int barFillW = (int)(cond * barMaxW);
+
+                DrawRectangle(barX, barY, barMaxW, barH2, (Color){ 40, 40, 56, 255 });
+
+                Color barColor;
+                if (cond < 0.5f) {
+                    barColor = (Color){ 200, 60, 60, 255 };
+                } else if (cond < 0.8f) {
+                    barColor = (Color){ 220, 180, 40, 255 };
+                } else {
+                    barColor = (Color){ 60, 180, 80, 255 };
+                }
+                DrawRectangle(barX, barY, barFillW, barH2, barColor);
+                DrawRectangleLines(barX, barY, barMaxW, barH2, COL_UI_BORDER);
+
+                char pctBuf[8];
+                snprintf(pctBuf, sizeof(pctBuf), "%d%%", (int)(cond * 100.0f));
+                DrawText(pctBuf, barX + barMaxW + 8, rowY + 7, 14, COL_UI_TEXT);
+
+                // TRADE label
+                if (cond >= 0.8f) {
+                    DrawText("TRADE", barX + barMaxW + 36, rowY + 7, 11,
+                             (Color){ 212, 165, 116, 255 });
+                }
+
             } else {
-                barColor = (Color){ 60, 180, 80, 255 };
+                DrawText("- empty -", panelX + pad + 8, rowY + 8, 15,
+                         (Color){ 90, 90, 100, 255 });
             }
-            DrawRectangle(barX, barY, barFillW, barH, barColor);
-            DrawRectangleLines(barX, barY, barMaxW, barH, COL_UI_BORDER);
+        }
+    }
+    // ---------------------------------------------------------------
+    // TAB 1: LOGS
+    // ---------------------------------------------------------------
+    else {
+        static const char *LOG_DISPLAY_TITLES[5] = {
+            "ATMOSPHERIC MAINTENANCE REPORT 7-4A",
+            "INFRASTRUCTURE REQUISITION #4471 — DENIED",
+            "PERSONNEL TRANSFER NOTICE — M. YUEN",
+            "PERSONAL NOTE — UNSENT",
+            "SIGNAL ANALYSIS — FRAGMENT (STATION 7-N)"
+        };
+        static const char *LOG_CATEGORIES[5] = {
+            "ADMINISTRATIVE — ROUTINE",
+            "ADMINISTRATIVE — PROCUREMENT",
+            "HUMAN RESOURCES — TRANSFER",
+            "ORIGIN UNKNOWN — RECOVERED FRAGMENT",
+            "TECHNICAL — UNCLASSIFIED"
+        };
 
-            char pctBuf[8];
-            snprintf(pctBuf, sizeof(pctBuf), "%d%%", (int)(cond * 100.0f));
-            DrawText(pctBuf, barX + barMaxW + 8, rowY + 7, 14, COL_UI_TEXT);
+        int logRowH  = 64;
+        int logStartY = contentY + 4;
+        int rowInnerPad = 10;
 
-            // TRADE label
-            if (cond >= 0.8f) {
-                DrawText("TRADE", barX + barMaxW + 36, rowY + 7, 11,
+        for (int i = 0; i < 5; i++) {
+            int rowX = panelX + pad;
+            int rowW = panelW - pad * 2;
+            int rowY = logStartY + i * logRowH;
+
+            // Divider above each row except first
+            if (i > 0) {
+                DrawLine(rowX, rowY, rowX + rowW, rowY,
+                         (Color){ 100, 85, 70, 80 });
+            }
+
+            bool acquired = (i < dataLogsPurchased);
+            bool rowHover = (mouse.x >= rowX && mouse.x < rowX + rowW &&
+                             mouse.y >= rowY && mouse.y < rowY + logRowH);
+
+            if (acquired) {
+                // Hover highlight
+                if (rowHover) {
+                    DrawRectangle(rowX, rowY + 1, rowW, logRowH - 1,
+                                  (Color){ 60, 50, 35, 120 });
+                }
+
+                // Document icon: small rectangle with horizontal lines
+                int iconX = rowX + rowInnerPad;
+                int iconY = rowY + logRowH / 2 - 14;
+                DrawRectangle(iconX, iconY, 18, 22,
+                              (Color){ 255, 255, 255, 40 });
+                DrawRectangleLines(iconX, iconY, 18, 22,
+                                   (Color){ 255, 255, 255, 100 });
+                // Lines on document
+                for (int ln = 0; ln < 3; ln++) {
+                    DrawLine(iconX + 3, iconY + 5 + ln * 5,
+                             iconX + 15, iconY + 5 + ln * 5,
+                             (Color){ 255, 255, 255, 100 });
+                }
+
+                // Log title
+                int titleFontSz = 14;
+                const char *displayTitle = LOG_DISPLAY_TITLES[i];
+                // Truncate if too wide
+                char truncTitle[64];
+                strncpy(truncTitle, displayTitle, 63);
+                truncTitle[63] = '\0';
+                // Shorten if needed
+                while (MeasureText(truncTitle, titleFontSz) > rowW - 120 && strlen(truncTitle) > 4) {
+                    int len = (int)strlen(truncTitle);
+                    truncTitle[len - 1] = '\0';
+                    truncTitle[len - 2] = '.';
+                    truncTitle[len - 3] = '.';
+                    truncTitle[len - 4] = '.';
+                }
+                DrawText(truncTitle,
+                         rowX + rowInnerPad + 26, rowY + logRowH / 2 - 14,
+                         titleFontSz, (Color){ 232, 224, 216, 255 });
+
+                // Subtitle: "LOG 0X — CATEGORY"
+                char subtitleBuf[64];
+                snprintf(subtitleBuf, sizeof(subtitleBuf), "LOG %02d  —  %s", i + 1, LOG_CATEGORIES[i]);
+                DrawText(subtitleBuf,
+                         rowX + rowInnerPad + 26, rowY + logRowH / 2 + 3,
+                         11, (Color){ 140, 130, 110, 200 });
+
+                // READ button on right
+                int readBtnW = 60;
+                int readBtnH = 24;
+                int readBtnX = rowX + rowW - readBtnW - rowInnerPad;
+                int readBtnY = rowY + logRowH / 2 - readBtnH / 2;
+                bool readHover = (mouse.x >= readBtnX && mouse.x < readBtnX + readBtnW &&
+                                  mouse.y >= readBtnY && mouse.y < readBtnY + readBtnH);
+                Color readBg = readHover ? (Color){ 80, 60, 30, 220 } :
+                                           (Color){ 40, 32, 18, 160 };
+                DrawRectangle(readBtnX, readBtnY, readBtnW, readBtnH, readBg);
+                DrawRectangleLines(readBtnX, readBtnY, readBtnW, readBtnH,
+                                   (Color){ 212, 165, 116, 180 });
+                int readTW = MeasureText("READ", 12);
+                DrawText("READ", readBtnX + readBtnW / 2 - readTW / 2,
+                         readBtnY + readBtnH / 2 - 6, 12,
                          (Color){ 212, 165, 116, 255 });
-            }
 
-        } else {
-            DrawText("- empty -", panelX + pad + 8, rowY + 8, 15,
-                     (Color){ 90, 90, 100, 255 });
+                // Click row or READ button
+                if (clicked && rowHover) {
+                    *dataLogViewerOpen  = true;
+                    *dataLogViewerIndex = i;
+                }
+
+            } else {
+                // LOCKED row
+                // Lock icon: small rect + circle on top
+                int iconX = rowX + rowInnerPad;
+                int iconY = rowY + logRowH / 2 - 6;
+                DrawCircleLines(iconX + 9, iconY - 3, 5, (Color){ 90, 80, 70, 160 });
+                DrawRectangle(iconX + 3, iconY, 12, 10, (Color){ 90, 80, 70, 100 });
+                DrawRectangleLines(iconX + 3, iconY, 12, 10, (Color){ 90, 80, 70, 160 });
+
+                // LOCKED text
+                int lockedW = MeasureText("— LOCKED —", 14);
+                DrawText("— LOCKED —",
+                         rowX + rowInnerPad + 26, rowY + logRowH / 2 - 11,
+                         14, (Color){ 80, 75, 70, 200 });
+                (void)lockedW;
+
+                // Purchase hint
+                DrawText("Purchase at the city gate",
+                         rowX + rowInnerPad + 26, rowY + logRowH / 2 + 6,
+                         11, (Color){ 80, 75, 70, 160 });
+            }
         }
     }
 
@@ -2396,58 +2580,103 @@ void DrawWorkbenchUI(InventorySlot *inventory, WorkbenchState *workbenchState,
 // ---------------------------------------------------------------------------
 void DrawDataLogViewer(int logIndex, bool *open)
 {
-    static const char *LOG_TITLES[5] = {
-        "Atmospheric Maintenance Report 7-4A",
-        "Infrastructure Requisition — DENIED",
-        "Personnel Transfer — Routine",
-        "Personal Note (Unsent)",
-        "Signal Analysis Fragment"
+    // Full display titles (shown in the viewer header)
+    static const char *LOG_VIEWER_TITLES[5] = {
+        "ATMOSPHERIC MAINTENANCE REPORT 7-4A",
+        "INFRASTRUCTURE REQUISITION #4471 — DENIED",
+        "PERSONNEL TRANSFER NOTICE — M. YUEN",
+        "PERSONAL NOTE — UNSENT",
+        "SIGNAL ANALYSIS — FRAGMENT (STATION 7-N)"
+    };
+
+    // Category tags (shown above title in small caps style)
+    static const char *LOG_CATEGORIES[5] = {
+        "ADMINISTRATIVE — ROUTINE",
+        "ADMINISTRATIVE — PROCUREMENT",
+        "HUMAN RESOURCES — TRANSFER",
+        "ORIGIN UNKNOWN — RECOVERED FRAGMENT",
+        "TECHNICAL — UNCLASSIFIED"
     };
 
     static const char *LOG_BODIES[5] = {
-        "SECTOR: Outer Basin / Classification: Routine\n\n"
-        "Cloud layer density within nominal parameters. Visibility threshold maintained at 0.0 — "
-        "no surface-to-upper deviation detected this cycle. Atmospheric processing units 14 "
-        "through 22 operating at 94% efficiency. Recommend scheduled maintenance on Unit 17 "
-        "(minor particulate accumulation).\n\n"
-        "Upper boundary integrity: confirmed stable. No unauthorized sensor activity in the outer "
-        "basin. Maintenance team deployment unnecessary at this time.\n\n"
-        "Note: Report filed automatically. No human review required.",
+        // Log 0 — Atmospheric Maintenance Report 7-4A
+        "SECTOR: Outer Basin / CYCLE: 1147 / CLASSIFICATION: Routine Maintenance\n\n"
+        "Cloud layer density within nominal parameters. Visibility threshold maintenance proceeding "
+        "on schedule. Upper boundary integrity confirmed stable across all monitored grid sectors.\n\n"
+        "Atmospheric processing units 14 through 22 operating at 94% efficiency. Unit 17 flagged "
+        "for minor particulate accumulation — recommend scheduled service within 30 cycles. No "
+        "impact to output targets.\n\n"
+        "Cloud layer density targets met. Surface-to-upper deviation: 0.00. No unauthorized sensor "
+        "activity detected in the outer basin this cycle.\n\n"
+        "Note: This report is generated automatically. Human review is not required or expected.",
 
-        "REQUEST: Replacement relay components, Boundary Station 7-North. Submitted by: Field Engineer Osei.\n\n"
+        // Log 1 — Infrastructure Requisition — Denied
+        "REQUEST: Replacement relay components, Boundary Station 7-North.\n"
+        "Submitted by: Field Engineer Osei, Outer Basin Infrastructure.\n"
+        "Priority: Standard.\n\n"
         "DENIAL REASON: Non-essential infrastructure. Boundary relay stations are scheduled for "
-        "decommission per Directive 11 (see attached). Requisition does not meet threshold for approval.\n\n"
-        "Field Engineer Osei's note (attached): 'Station 7-North is still transmitting. I don't know "
-        "what it's picking up but the signal is not random noise. Decommission seems premature. "
-        "Requesting review.'\n\n"
-        "Review Status: CLOSED. No further action.",
+        "decommission per Directive 11 (full decommission timeline attached — see Appendix C). "
+        "This requisition does not meet the minimum threshold for approval.\n\n"
+        "The requesting engineer is advised that continued maintenance of boundary relay stations "
+        "is not authorized under current operational guidelines. Resources should be directed toward "
+        "approved infrastructure priorities.\n\n"
+        "Appended note from Field Engineer Osei: 'Station 7-North is still transmitting. I have "
+        "checked the equipment three times. The station is receiving something it shouldn't be able "
+        "to receive — the signal is coming from the wrong direction. I am not requesting these parts "
+        "to keep a dead station running. I am requesting them because something out there is still "
+        "talking to it.'\n\n"
+        "Review status: CLOSED. Appended note not forwarded. No further action.",
 
-        "Employee: M. Yuen / Previous Post: Outer Basin Resource Allocation / New Post: Upper District, Sector 7\n\n"
-        "Transfer effective immediately. Standard relocation package applies. Employee has been briefed "
-        "on Upper District protocols and has signed the relevant agreements.\n\n"
-        "Note: Upper District assignments are non-transferable and non-revocable. Employee acknowledges "
-        "that contact with previous colleagues and family in the Outer Basin will be limited to approved "
-        "communication channels.\n\n"
-        "We wish M. Yuen well in their new role.\n\nHR Department — Automated Processing",
+        // Log 2 — Personnel Transfer — Routine
+        "Employee: M. Yuen\n"
+        "Previous post: Outer Basin Resource Allocation, Grade 3\n"
+        "New post: Upper District, Sector 7\n"
+        "Effective: Immediately upon receipt\n\n"
+        "Transfer is classified as routine reassignment. Standard relocation protocols apply. "
+        "Employee has been briefed on Upper District access requirements and has signed all "
+        "relevant compliance agreements.\n\n"
+        "Note: Upper District assignments are non-transferable. Contact with personnel and family "
+        "members in the Outer Basin will be managed through approved communication channels only. "
+        "Frequency of contact will be determined by Upper District operational requirements.\n\n"
+        "Upper District does not appear on standard city maps. This is consistent with operational "
+        "policy. Employees assigned to Upper District are not required to disclose their posting "
+        "location to non-authorized personnel.\n\n"
+        "We wish M. Yuen well in their continued service.\n\n"
+        "— HR Processing, Automated",
 
+        // Log 3 — Personal Note (Unsent)
         "I went back to the eastern ridge last night. I know I said I wouldn't.\n\n"
-        "The cloud wall was lower than I've ever seen it. For maybe thirty seconds I could see past it. "
-        "I keep trying to find the right word for the color. It wasn't the gray we have here, or the brown "
-        "of the basin. It was green. Not a little green. An impossible green, the kind you see in old "
-        "pictures of places that used to exist.\n\n"
-        "I told Petra and she said I was sunstruck. Maybe. But I wasn't. I know what I saw.\n\n"
-        "I'm going back. I'm bringing a recorder this time. If anyone finds this note and I don't come "
-        "back — I wasn't sunstruck.",
+        "The cloud wall was lower than I've ever seen it — maybe the processing units were running "
+        "slow, or maybe I just got lucky with the timing. For maybe thirty seconds I could see past "
+        "the lower edge. I keep trying to find the right word for what I saw.\n\n"
+        "It wasn't the gray we have here. It wasn't the brown of the basin. It was green. Not a "
+        "little green, not a trick of the light. An impossible green, the kind you see in old "
+        "pictures that people say are fabricated. It went as far as I could see before the clouds "
+        "closed back up.\n\n"
+        "I told Petra what I saw and she said I was sunstruck. She said it kindly. She might even "
+        "believe it. I don't.\n\n"
+        "I'm going back. I'm bringing a recorder this time. I've been practicing the route in my "
+        "head — there's a way along the northern ridge that avoids the checkpoint. If you're reading "
+        "this and I haven't come back: I wasn't sunstruck. I knew exactly what I was doing.",
 
-        "SOURCE: Boundary Station 7-North (scheduled decommission, still active)\n"
-        "Signal type: structured radio transmission / Frequency: non-standard / Origin: ABOVE cloud layer\n\n"
-        "Pattern analysis: transmission follows recursive mathematical structure inconsistent with natural "
-        "phenomena. Repetition interval: 4.7 seconds. Signal has been present in archived data for at "
-        "least 11 years.\n\n"
-        "Conclusion: Signal is of deliberate origin. Source is located above the maintained cloud layer, "
-        "in a region officially designated as uninhabitable.\n\n"
-        "This analysis was not requested. I am filing it anyway.\n\n"
-        "— Station 7-North, automated relay. Engineer Osei, appended note."
+        // Log 4 — Signal Analysis Fragment
+        "SOURCE: Boundary Station 7-North (decommission pending — still active)\n"
+        "SIGNAL TYPE: Structured radio transmission\n"
+        "FREQUENCY: Non-standard — outside monitored spectrum\n"
+        "SIGNAL ORIGIN: Above maintained cloud layer\n\n"
+        "Analysis: The received transmission follows a recursive mathematical structure inconsistent "
+        "with any known natural phenomenon. Repetition interval: 4.7 seconds, with embedded "
+        "variation suggesting information content rather than carrier noise.\n\n"
+        "Cross-reference with archived Station 7-North logs confirms the signal has been present "
+        "in the data for a minimum of eleven years. It predates the most recent atmospheric "
+        "processing upgrades. It may predate the processing system entirely.\n\n"
+        "This analysis was not requested by any supervisor or department. I am filing it through "
+        "the maintenance log system because I do not know where else to put it. I do not know "
+        "what is above the cloud layer. I do not know who or what is transmitting.\n\n"
+        "I know the signal is there. I know it is deliberate. I know we are not supposed to be "
+        "looking.\n\n"
+        "— Appended by Station 7-North automated relay. Secondary appended note: Engineer Osei, "
+        "personal notation. Date"
     };
 
     if (logIndex < 0 || logIndex >= 5) { *open = false; return; }
@@ -2455,69 +2684,68 @@ void DrawDataLogViewer(int logIndex, bool *open)
     int sw = GetScreenWidth();
     int sh = GetScreenHeight();
 
-    // Very dark background
-    DrawRectangle(0, 0, sw, sh, (Color){ 8, 6, 4, 250 });
+    // Very dark full-screen background
+    DrawRectangle(0, 0, sw, sh, (Color){ 8, 6, 4, 252 });
 
     // Parchment-toned text panel
     int panelW = 760;
-    int panelH = 560;
+    int panelH = 580;
     int panelX = sw / 2 - panelW / 2;
     int panelY = sh / 2 - panelH / 2;
 
-    DrawRectangle(panelX, panelY, panelW, panelH, (Color){ 28, 22, 16, 255 });
+    DrawRectangle(panelX, panelY, panelW, panelH, (Color){ 28, 22, 16, 245 });
     DrawRectangleLines(panelX, panelY, panelW, panelH, (Color){ 212, 165, 116, 255 });
 
     // Inner border
     DrawRectangleLines(panelX + 4, panelY + 4, panelW - 8, panelH - 8,
                        (Color){ 140, 100, 60, 80 });
 
-    // Log index badge
-    char badgeBuf[16];
-    snprintf(badgeBuf, sizeof(badgeBuf), "LOG %d/5", logIndex + 1);
-    DrawText(badgeBuf, panelX + 16, panelY + 14, 12, (Color){ 140, 100, 60, 200 });
+    int curPanelY = panelY + 16;
 
-    // Title
-    const char *logTitle = LOG_TITLES[logIndex];
-    int titleFontSize = 18;
+    // Category tag (small caps style, gold, smaller font)
+    const char *catTag = LOG_CATEGORIES[logIndex];
+    int catW = MeasureText(catTag, 12);
+    DrawText(catTag, panelX + panelW / 2 - catW / 2, curPanelY,
+             12, (Color){ 212, 165, 116, 200 });
+    curPanelY += 18;
+
+    // Title in gold, font 20
+    const char *logTitle = LOG_VIEWER_TITLES[logIndex];
+    int titleFontSize = 20;
     int titleW = MeasureText(logTitle, titleFontSize);
-    // If title is too wide, use smaller font
-    if (titleW > panelW - 40) titleFontSize = 14;
+    if (titleW > panelW - 32) titleFontSize = 15;
     titleW = MeasureText(logTitle, titleFontSize);
-    DrawText(logTitle, panelX + panelW / 2 - titleW / 2, panelY + 14,
+    DrawText(logTitle, panelX + panelW / 2 - titleW / 2, curPanelY,
              titleFontSize, (Color){ 212, 165, 116, 255 });
+    curPanelY += titleFontSize + 10;
 
-    // Divider
-    DrawLine(panelX + 16, panelY + 42, panelX + panelW - 16, panelY + 42,
+    // Thin horizontal rule between title and body
+    DrawLine(panelX + 20, curPanelY, panelX + panelW - 20, curPanelY,
              (Color){ 212, 165, 116, 100 });
+    curPanelY += 10;
 
-    // Body text — word-wrapped using DrawTextEx style with manual wrapping
-    // We'll draw the text using a simple manual word-wrap approach
-    const char *body = LOG_BODIES[logIndex];
-    int textX       = panelX + 20;
-    int textY       = panelY + 52;
-    int textMaxW    = panelW - 40;
-    int bodyFontSz  = 15;
-    int lineHeight  = bodyFontSz + 5;
-    int maxTextY    = panelY + panelH - 56; // leave room for close button
+    // Body text — word-wrapped with manual line breaks respected
+    const char *body   = LOG_BODIES[logIndex];
+    int textX          = panelX + 24;
+    int textMaxW       = panelW - 48;
+    int bodyFontSz     = 15;
+    int lineHeight     = bodyFontSz + 5;
+    int maxTextY       = panelY + panelH - 60; // leave room for close button
 
-    // Simple word-wrap: build line by line
     char lineBuf[256];
     int  lineLen = 0;
-    int  curY    = textY;
+    int  textY   = curPanelY;
 
     const char *p = body;
-    while (*p && curY < maxTextY) {
-        // Find next word or newline
+    while (*p && textY < maxTextY) {
         if (*p == '\n') {
-            // Flush current line
             if (lineLen > 0) {
                 lineBuf[lineLen] = '\0';
-                DrawText(lineBuf, textX, curY, bodyFontSz, (Color){ 232, 220, 200, 255 });
+                DrawText(lineBuf, textX, textY, bodyFontSz, (Color){ 220, 210, 195, 255 });
             }
-            curY += lineHeight;
-            // Extra blank line on double-newline
+            textY += lineHeight;
             if (*(p + 1) == '\n') {
-                curY += lineHeight / 2;
+                textY += lineHeight / 2;
                 p++;
             }
             lineLen = 0;
@@ -2525,12 +2753,10 @@ void DrawDataLogViewer(int logIndex, bool *open)
             continue;
         }
 
-        // Find end of word
         const char *wordStart = p;
         while (*p && *p != ' ' && *p != '\n') p++;
         int wordLen = (int)(p - wordStart);
 
-        // Check if adding word fits
         char testBuf[256];
         int  testLen = lineLen;
         if (testLen > 0) { testBuf[testLen++] = ' '; }
@@ -2541,33 +2767,28 @@ void DrawDataLogViewer(int logIndex, bool *open)
 
         int testW = MeasureText(testBuf, bodyFontSz);
         if (testW > textMaxW && lineLen > 0) {
-            // Flush current line and start new
             lineBuf[lineLen] = '\0';
-            DrawText(lineBuf, textX, curY, bodyFontSz, (Color){ 232, 220, 200, 255 });
-            curY += lineHeight;
-            // Start new line with current word
+            DrawText(lineBuf, textX, textY, bodyFontSz, (Color){ 220, 210, 195, 255 });
+            textY += lineHeight;
             lineLen = 0;
             for (int wi = 0; wi < wordLen && lineLen < 254; wi++) {
                 lineBuf[lineLen++] = wordStart[wi];
             }
         } else {
-            // Add to line
             if (lineLen > 0 && lineLen < 254) lineBuf[lineLen++] = ' ';
             for (int wi = 0; wi < wordLen && lineLen < 254; wi++) {
                 lineBuf[lineLen++] = wordStart[wi];
             }
         }
 
-        // Skip trailing space
         if (*p == ' ') p++;
     }
-    // Flush remaining line
-    if (lineLen > 0 && curY < maxTextY) {
+    if (lineLen > 0 && textY < maxTextY) {
         lineBuf[lineLen] = '\0';
-        DrawText(lineBuf, textX, curY, bodyFontSz, (Color){ 232, 220, 200, 255 });
+        DrawText(lineBuf, textX, textY, bodyFontSz, (Color){ 220, 210, 195, 255 });
     }
 
-    // CLOSE button at bottom
+    // CLOSE button at bottom center
     int closeBtnW = 120;
     int closeBtnH = 36;
     int closeBtnX = panelX + panelW / 2 - closeBtnW / 2;
