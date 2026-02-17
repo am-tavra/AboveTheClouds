@@ -12,7 +12,7 @@
 #define NUM_SCAVENGE_ITEMS 18
 #define NUM_PARTICLES 15
 #define NUM_CITY_BUILDINGS 6
-#define MAX_INVENTORY 8
+#define MAX_INVENTORY 10
 #define PICKUP_RADIUS 50.0f
 #define PICKUP_EFFECT_DURATION 0.3f
 #define FULL_MSG_DURATION 2.0f
@@ -32,6 +32,26 @@ typedef enum {
     STORM_ACTIVE,
     STORM_FADING
 } StormState;
+
+// Workbench states
+typedef enum {
+    WB_CLOSED,
+    WB_OPEN,
+    WB_REPAIRING
+} WorkbenchState;
+
+// Workbench world position (building1 is at villageCenter - (100,80), bench is centered inside)
+// villageCenter = (WORLD_WIDTH/2, WORLD_HEIGHT/2) = (2000, 2000)
+// building1.x = 2000 - 100 = 1900, building1.y = 2000 - 80 = 1920, w=80, h=60
+// bench center x = 1900 + 80/2 = 1940, bench center y = 1920 + 60 - 18 = 1962
+#define WORKBENCH_X (WORLD_WIDTH / 2.0f - 100.0f + 80.0f / 2.0f)
+#define WORKBENCH_Y (WORLD_HEIGHT / 2.0f - 80.0f + 60.0f - 18.0f)
+
+// City gate position: villageCenter + (200, 0)
+// villageCenter = (2000, 2000), so gate is at (2200, 2000)
+#define GATE_X (WORLD_WIDTH / 2.0f + 200.0f)
+#define GATE_Y (WORLD_HEIGHT / 2.0f)
+#define GATE_INTERACT_RADIUS 70.0f
 
 // --- New palette ---
 // Ground
@@ -236,8 +256,8 @@ void DrawAtmosphere(Camera2D camera, int screenWidth, int screenHeight);
 void UpdateParticles(Particle *particles, int count, float deltaTime);
 void DrawParticles(Particle *particles, int count);
 void DrawPickupEffect(PickupEffect *effect, Camera2D camera);
-void DrawInventoryScreen(InventorySlot *inventory);
-void DrawHUD(InventorySlot *inventory, int screenWidth);
+void DrawInventoryScreen(InventorySlot *inventory, int maxInv);
+void DrawHUD(InventorySlot *inventory, int screenWidth, int maxInv, int tokenCount, float tokenAnimTimer, int tokenAnimDelta);
 void DrawParallaxDunes(ParallaxDune *dunes, int count, Camera2D camera,
                        int screenWidth, int screenHeight);
 void DrawFootprints(Footprint *footprints, int count);
@@ -249,6 +269,19 @@ void DrawSunMoon(float dayPhase, int screenWidth);
 void DrawStormOverlay(StormState state, float stormPhase, StormParticle *particles,
                       int count, int screenWidth, int screenHeight);
 void DrawSpawnShimmers(SpawnShimmer *shimmers, int count);
+void DrawWorkbenchUI(InventorySlot *inventory, WorkbenchState *workbenchState,
+                     int *repairSlot, int *sacrificeSlot,
+                     float *repairTimer, bool *repairDone,
+                     float *pickupFlashTimer, float pickupFlashMax,
+                     int maxInventory, float baseRepairBonus);
+void DrawTradeScreenUI(InventorySlot *inventory, int maxInventory,
+                       int *tokenCount, bool *tradeScreenOpen,
+                       int *dataLogsPurchased, bool *toolUpgradePurchased,
+                       bool *carryUpgradePurchased, int *maxInventoryPtr,
+                       float *baseRepairBonusPtr, float *tokenAnimTimer,
+                       int *tokenAnimDelta, int *selectedTradeSlot,
+                       bool *dataLogViewerOpen, int *dataLogViewerIndex);
+void DrawDataLogViewer(int logIndex, bool *open);
 
 // Helper: draw a rounded rectangle using a rectangle + circles at corners
 static void DrawRoundRect(float x, float y, float w, float h, float r, Color col)
@@ -276,18 +309,18 @@ static Color ColorLerpRGBA(Color a, Color b, float t)
     };
 }
 
-int CountInventory(InventorySlot *inventory)
+int CountInventory(InventorySlot *inventory, int maxInv)
 {
     int count = 0;
-    for (int i = 0; i < MAX_INVENTORY; i++) {
+    for (int i = 0; i < maxInv; i++) {
         if (inventory[i].occupied) count++;
     }
     return count;
 }
 
-bool AddToInventory(InventorySlot *inventory, int typeIndex, float condition)
+bool AddToInventory(InventorySlot *inventory, int typeIndex, float condition, int maxInv)
 {
-    for (int i = 0; i < MAX_INVENTORY; i++) {
+    for (int i = 0; i < maxInv; i++) {
         if (!inventory[i].occupied) {
             inventory[i].typeIndex = typeIndex;
             inventory[i].condition = condition;
@@ -396,6 +429,27 @@ int main(void)
         inventory[i].condition = 0.0f;
     }
 
+    // Workbench state
+    WorkbenchState workbenchState = WB_CLOSED;
+    int   repairSlot    = -1;
+    int   sacrificeSlot = -1;
+    float repairTimer   = 0.0f;
+    bool  repairDone    = false;
+
+    // Gate trade state
+    int   tokenCount          = 0;
+    bool  tradeScreenOpen     = false;
+    int   dataLogsPurchased   = 0;
+    bool  toolUpgradePurchased  = false;
+    bool  carryUpgradePurchased = false;
+    int   maxInventory        = 8;        // starts at 8, upgrades to 10
+    float baseRepairBonus     = 0.2f;     // starts at 0.2, upgrades to 0.25
+    float tokenAnimTimer      = 0.0f;
+    int   tokenAnimDelta      = 1;
+    int   selectedTradeSlot   = -1;
+    bool  dataLogViewerOpen   = false;
+    int   dataLogViewerIndex  = 0;
+
     // Pickup effect
     PickupEffect pickupEffect = { 0 };
     pickupEffect.active = false;
@@ -497,12 +551,52 @@ int main(void)
         float shadowOffsetY = 6.0f;
         if (isNight) { shadowOffsetX = 0.0f; shadowOffsetY = 0.0f; }
 
-        // Toggle inventory
-        if (IsKeyPressed(KEY_TAB)) {
+        // Token anim timer
+        if (tokenAnimTimer > 0.0f) {
+            tokenAnimTimer -= deltaTime;
+            if (tokenAnimTimer < 0.0f) tokenAnimTimer = 0.0f;
+        }
+
+        // Toggle inventory (only when workbench and trade screen are closed)
+        if (IsKeyPressed(KEY_TAB) && workbenchState == WB_CLOSED && !tradeScreenOpen) {
             inventoryOpen = !inventoryOpen;
         }
         if (IsKeyPressed(KEY_ESCAPE) && inventoryOpen) {
             inventoryOpen = false;
+        }
+        // Close trade screen on ESC (handled also in DrawTradeScreenUI, but catch here too)
+        if (IsKeyPressed(KEY_ESCAPE) && tradeScreenOpen) {
+            tradeScreenOpen    = false;
+            selectedTradeSlot  = -1;
+        }
+
+        // Workbench repair timer (advance while repairing)
+        if (workbenchState == WB_REPAIRING) {
+            repairTimer += deltaTime;
+            if (repairTimer >= 2.0f) {
+                // Repair complete
+                if (repairSlot >= 0 && repairSlot < maxInventory &&
+                    inventory[repairSlot].occupied) {
+                    // Apply bonus using baseRepairBonus (matching type adds +0.1)
+                    ItemCategory repCat  = ITEM_TYPES[inventory[repairSlot].typeIndex].category;
+                    ItemCategory sacCat  = ITEM_TYPES[inventory[sacrificeSlot].typeIndex].category;
+                    float bonus = (repCat == sacCat) ? (baseRepairBonus + 0.1f) : baseRepairBonus;
+                    inventory[repairSlot].condition += bonus;
+                    if (inventory[repairSlot].condition > 1.0f)
+                        inventory[repairSlot].condition = 1.0f;
+                }
+                // Destroy sacrifice
+                if (sacrificeSlot >= 0 && sacrificeSlot < maxInventory) {
+                    inventory[sacrificeSlot].occupied = false;
+                    inventory[sacrificeSlot].condition = 0.0f;
+                }
+                repairSlot    = -1;
+                sacrificeSlot = -1;
+                repairDone    = true;
+                workbenchState = WB_OPEN;
+                // Trigger pickup flash
+                pickupFlashTimer = pickupFlashMax;
+            }
         }
 
         // --- Sandstorm state machine ---
@@ -545,7 +639,7 @@ int main(void)
             }
         }
 
-        if (!inventoryOpen) {
+        if (!inventoryOpen && workbenchState == WB_CLOSED && !tradeScreenOpen && !dataLogViewerOpen) {
             // Player movement with WASD
             Vector2 movement = { 0 };
             if (IsKeyDown(KEY_W)) movement.y -= 1;
@@ -647,26 +741,60 @@ int main(void)
                 if (fullMsgTimer < 0.0f) fullMsgTimer = 0.0f;
             }
 
-            // E to pick up nearest active item within radius
+            // E key: check gate proximity, workbench proximity, then item pickup
             if (IsKeyPressed(KEY_E)) {
+                // Check gate proximity (70px)
+                Vector2 gatePos = { GATE_X, GATE_Y };
+                float gateDist  = Vector2Distance(playerPos, gatePos);
+                // Check workbench proximity (60px)
+                Vector2 wbPos = { WORKBENCH_X, WORKBENCH_Y };
+                float wbDist  = Vector2Distance(playerPos, wbPos);
+                bool nearItem = false;
                 for (int i = 0; i < NUM_SCAVENGE_ITEMS; i++) {
                     if (!worldItems[i].active) continue;
-                    float dist = Vector2Distance(playerPos, worldItems[i].position);
-                    if (dist <= PICKUP_RADIUS) {
-                        int invCount = CountInventory(inventory);
-                        if (invCount < MAX_INVENTORY) {
-                            AddToInventory(inventory, worldItems[i].typeIndex,
-                                           worldItems[i].condition);
-                            worldItems[i].active = false;
-                            worldItems[i].respawnTimer = 60.0f + (float)GetRandomValue(0, 30);
-                            pickupEffect.position = worldItems[i].position;
-                            pickupEffect.timer    = PICKUP_EFFECT_DURATION;
-                            pickupEffect.active   = true;
-                            pickupFlashTimer      = pickupFlashMax;
-                        } else {
-                            fullMsgTimer = FULL_MSG_DURATION;
+                    if (Vector2Distance(playerPos, worldItems[i].position) <= PICKUP_RADIUS) {
+                        nearItem = true;
+                        break;
+                    }
+                }
+                // Gate takes priority if near enough and no workbench open
+                if (!nearItem && gateDist <= GATE_INTERACT_RADIUS && workbenchState == WB_CLOSED) {
+                    tradeScreenOpen   = true;
+                    selectedTradeSlot = -1;
+                } else if (!nearItem && wbDist <= 60.0f && workbenchState == WB_CLOSED) {
+                    // Open workbench
+                    workbenchState = WB_OPEN;
+                    repairSlot     = -1;
+                    sacrificeSlot  = -1;
+                    repairDone     = false;
+                } else {
+                    // Normal item pickup
+                    for (int i = 0; i < NUM_SCAVENGE_ITEMS; i++) {
+                        if (!worldItems[i].active) continue;
+                        float dist = Vector2Distance(playerPos, worldItems[i].position);
+                        if (dist <= PICKUP_RADIUS) {
+                            int invCount = CountInventory(inventory, maxInventory);
+                            if (invCount < maxInventory) {
+                                AddToInventory(inventory, worldItems[i].typeIndex,
+                                               worldItems[i].condition, maxInventory);
+                                worldItems[i].active = false;
+                                worldItems[i].respawnTimer = 60.0f + (float)GetRandomValue(0, 30);
+                                pickupEffect.position = worldItems[i].position;
+                                pickupEffect.timer    = PICKUP_EFFECT_DURATION;
+                                pickupEffect.active   = true;
+                                pickupFlashTimer      = pickupFlashMax;
+                            } else {
+                                fullMsgTimer = FULL_MSG_DURATION;
+                            }
+                            break; // only pick up one item per press
                         }
-                        break; // only pick up one item per press
+                    }
+                    // If near workbench and no item, open it
+                    if (!nearItem && wbDist <= 60.0f && workbenchState == WB_CLOSED) {
+                        workbenchState = WB_OPEN;
+                        repairSlot     = -1;
+                        sacrificeSlot  = -1;
+                        repairDone     = false;
                     }
                 }
             }
@@ -851,8 +979,8 @@ int main(void)
             DrawText(stormMsg, smX, 56, 16, (Color){ 212, 184, 150, ma });
         }
 
-        // HUD: pack count
-        DrawHUD(inventory, screenWidth);
+        // HUD: pack count + token indicator
+        DrawHUD(inventory, screenWidth, maxInventory, tokenCount, tokenAnimTimer, tokenAnimDelta);
 
         // Full inventory message
         if (fullMsgTimer > 0.0f) {
@@ -870,7 +998,32 @@ int main(void)
 
         // Inventory screen overlay
         if (inventoryOpen) {
-            DrawInventoryScreen(inventory);
+            DrawInventoryScreen(inventory, maxInventory);
+        }
+
+        // Workbench UI overlay
+        if (workbenchState != WB_CLOSED) {
+            DrawWorkbenchUI(inventory, &workbenchState,
+                            &repairSlot, &sacrificeSlot,
+                            &repairTimer, &repairDone,
+                            &pickupFlashTimer, pickupFlashMax,
+                            maxInventory, baseRepairBonus);
+        }
+
+        // Trade screen overlay
+        if (tradeScreenOpen) {
+            DrawTradeScreenUI(inventory, maxInventory,
+                              &tokenCount, &tradeScreenOpen,
+                              &dataLogsPurchased, &toolUpgradePurchased,
+                              &carryUpgradePurchased, &maxInventory,
+                              &baseRepairBonus, &tokenAnimTimer,
+                              &tokenAnimDelta, &selectedTradeSlot,
+                              &dataLogViewerOpen, &dataLogViewerIndex);
+        }
+
+        // Data log viewer overlay (can be opened from trade screen or independently)
+        if (dataLogViewerOpen) {
+            DrawDataLogViewer(dataLogViewerIndex, &dataLogViewerOpen);
         }
 
         EndDrawing();
@@ -1690,7 +1843,7 @@ void DrawPickupEffect(PickupEffect *effect, Camera2D camera)
 // ---------------------------------------------------------------------------
 // DrawInventoryScreen
 // ---------------------------------------------------------------------------
-void DrawInventoryScreen(InventorySlot *inventory)
+void DrawInventoryScreen(InventorySlot *inventory, int maxInv)
 {
     int sw = GetScreenWidth();
     int sh = GetScreenHeight();
@@ -1698,9 +1851,10 @@ void DrawInventoryScreen(InventorySlot *inventory)
     // Semi-transparent overlay
     DrawRectangle(0, 0, sw, sh, (Color){ 26, 26, 46, 200 });
 
-    // Panel
+    // Panel — height adjusts for maxInv
     int panelW = 520;
-    int panelH = 480;
+    int panelH = 82 + maxInv * 44 + 30;
+    if (panelH < 480) panelH = 480;
     int panelX = sw / 2 - panelW / 2;
     int panelY = sh / 2 - panelH / 2;
     int pad    = 12;
@@ -1726,7 +1880,7 @@ void DrawInventoryScreen(InventorySlot *inventory)
     int rowH   = 44;
     int startY = panelY + 82;
 
-    for (int i = 0; i < MAX_INVENTORY; i++) {
+    for (int i = 0; i < maxInv; i++) {
         int rowY = startY + i * rowH;
 
         // Entry divider line
@@ -1737,6 +1891,14 @@ void DrawInventoryScreen(InventorySlot *inventory)
 
         if (inventory[i].occupied) {
             const ItemTypeDef *def = &ITEM_TYPES[inventory[i].typeIndex];
+            float cond = inventory[i].condition;
+
+            // TRADE: gold border around row if condition >= 0.8
+            if (cond >= 0.8f) {
+                DrawRectangleLines(panelX + pad - 2, rowY + 2,
+                                   panelW - pad * 2 + 4, rowH - 4,
+                                   (Color){ 212, 165, 116, 255 });
+            }
 
             // Color swatch
             DrawRectangle(panelX + pad, rowY + 6, 12, 12, def->color);
@@ -1751,7 +1913,6 @@ void DrawInventoryScreen(InventorySlot *inventory)
                      (Color){ 180, 200, 180, 255 });
 
             // Condition bar
-            float cond      = inventory[i].condition;
             int barX        = panelX + 340;
             int barY        = rowY + 10;
             int barMaxW     = 100;
@@ -1775,6 +1936,12 @@ void DrawInventoryScreen(InventorySlot *inventory)
             snprintf(pctBuf, sizeof(pctBuf), "%d%%", (int)(cond * 100.0f));
             DrawText(pctBuf, barX + barMaxW + 8, rowY + 7, 14, COL_UI_TEXT);
 
+            // TRADE label
+            if (cond >= 0.8f) {
+                DrawText("TRADE", barX + barMaxW + 36, rowY + 7, 11,
+                         (Color){ 212, 165, 116, 255 });
+            }
+
         } else {
             DrawText("- empty -", panelX + pad + 8, rowY + 8, 15,
                      (Color){ 90, 90, 100, 255 });
@@ -1791,28 +1958,57 @@ void DrawInventoryScreen(InventorySlot *inventory)
 // ---------------------------------------------------------------------------
 // DrawHUD
 // ---------------------------------------------------------------------------
-void DrawHUD(InventorySlot *inventory, int screenWidth)
+void DrawHUD(InventorySlot *inventory, int screenWidth, int maxInv, int tokenCount,
+             float tokenAnimTimer, int tokenAnimDelta)
 {
+    (void)tokenAnimDelta;
+
     int count = 0;
-    for (int i = 0; i < MAX_INVENTORY; i++) {
+    for (int i = 0; i < maxInv; i++) {
         if (inventory[i].occupied) count++;
     }
 
     char buf[32];
-    snprintf(buf, sizeof(buf), "PACK: %d/%d", count, MAX_INVENTORY);
+    snprintf(buf, sizeof(buf), "PACK: %d/%d", count, maxInv);
 
     int fontSize = 20;
     int textW    = MeasureText(buf, fontSize);
     int padX     = 12;
     int padY     = 8;
-    int rectX    = screenWidth - textW - padX * 2 - 10;
-    int rectY    = 10;
     int rectW    = textW + padX * 2;
     int rectH    = fontSize + padY * 2;
+    int rectX    = screenWidth - rectW - 10;
+    int rectY    = 10;
 
     DrawRectangle(rectX, rectY, rectW, rectH, COL_UI_BG);
     DrawRectangleLines(rectX, rectY, rectW, rectH, COL_UI_BORDER);
     DrawText(buf, rectX + padX, rectY + padY, fontSize, COL_UI_HEADER);
+
+    // Token coin indicator (to the left of pack counter)
+    int coinRadius = 14;
+    int coinX      = rectX - coinRadius * 2 - 18;
+    int coinCY     = rectY + rectH / 2;
+
+    // Coin scale animation
+    int animR = coinRadius;
+    if (tokenAnimTimer > 0.0f) animR = coinRadius + 3;
+
+    DrawCircle(coinX, coinCY, (float)animR, (Color){ 255, 215, 0, 220 });
+    DrawCircleLines(coinX, coinCY, (float)animR, (Color){ 200, 160, 40, 255 });
+
+    char tokenBuf[8];
+    snprintf(tokenBuf, sizeof(tokenBuf), "%d", tokenCount);
+    int tkW = MeasureText(tokenBuf, 14);
+    DrawText(tokenBuf, coinX - tkW / 2, coinCY - 7, 14, (Color){ 26, 16, 8, 255 });
+
+    // Floating +/- delta when animating
+    if (tokenAnimTimer > 0.0f) {
+        float progress = 1.0f - (tokenAnimTimer / 0.4f); // 0..1
+        int floatY = coinCY - 10 - (int)(progress * 20.0f);
+        unsigned char fa = (unsigned char)((1.0f - progress) * 200.0f);
+        DrawText(tokenAnimDelta > 0 ? "+1" : "-1",
+                 coinX - 8, floatY, 14, (Color){ 255, 240, 100, fa });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1873,5 +2069,1004 @@ void DrawSpawnShimmers(SpawnShimmer *shimmers, int count)
             };
             DrawLineEx(from, to, 1.5f, col);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DrawWorkbenchUI  (screen space, called after EndMode2D)
+// ---------------------------------------------------------------------------
+void DrawWorkbenchUI(InventorySlot *inventory, WorkbenchState *workbenchState,
+                     int *repairSlot, int *sacrificeSlot,
+                     float *repairTimer, bool *repairDone,
+                     float *pickupFlashTimer, float pickupFlashMax,
+                     int maxInv, float baseRepairBonus)
+{
+    (void)repairDone;
+
+    int sw = GetScreenWidth();
+    int sh = GetScreenHeight();
+
+    // Full-screen dark overlay
+    DrawRectangle(0, 0, sw, sh, (Color){ 10, 8, 6, 210 });
+
+    // Panel dimensions
+    int panelW = 900;
+    int panelH = 560;
+    int panelX = sw / 2 - panelW / 2;
+    int panelY = sh / 2 - panelH / 2;
+
+    // Panel background + border
+    DrawRectangle(panelX, panelY, panelW, panelH, (Color){ 26, 20, 14, 240 });
+    DrawRectangleLines(panelX, panelY, panelW, panelH, (Color){ 212, 165, 116, 255 });
+
+    // Title
+    const char *title = "WORKBENCH";
+    int titleW = MeasureText(title, 22);
+    DrawText(title, panelX + panelW / 2 - titleW / 2, panelY + 14, 22,
+             (Color){ 212, 165, 116, 255 });
+    // Title underline
+    DrawLine(panelX + 16, panelY + 44, panelX + panelW - 16, panelY + 44,
+             (Color){ 212, 165, 116, 100 });
+
+    // ---------- LEFT PANEL: Inventory ----------
+    int invPanelX = panelX + 20;
+    int invPanelW = 240;
+    int invStartY = panelY + 56;
+    int rowH      = 52;
+
+    DrawText("INVENTORY", invPanelX, invStartY, 16, (Color){ 212, 165, 116, 255 });
+    invStartY += 22;
+
+    bool clicked = IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
+    Vector2 mouse = GetMousePosition();
+
+    for (int i = 0; i < maxInv; i++) {
+        int rowX = invPanelX;
+        int rowY = invStartY + i * rowH;
+
+        // Row background
+        DrawRectangle(rowX, rowY, invPanelW, rowH - 2, (Color){ 20, 16, 12, 200 });
+
+        // Highlight: repair slot (blue), sacrifice slot (red)
+        if (*repairSlot == i) {
+            DrawRectangle(rowX, rowY, invPanelW, rowH - 2, (Color){ 60, 100, 160, 40 });
+        }
+        if (*sacrificeSlot == i) {
+            DrawRectangle(rowX, rowY, invPanelW, rowH - 2, (Color){ 160, 60, 60, 40 });
+        }
+
+        if (inventory[i].occupied) {
+            const ItemTypeDef *def = &ITEM_TYPES[inventory[i].typeIndex];
+            float cond = inventory[i].condition;
+
+            // TRADE: gold border if condition >= 0.8
+            if (cond >= 0.8f) {
+                DrawRectangleLines(rowX, rowY, invPanelW, rowH - 2,
+                                   (Color){ 212, 165, 116, 255 });
+            }
+
+            // Color swatch (14x14)
+            DrawRectangle(rowX + 4, rowY + (rowH - 2) / 2 - 7, 14, 14, def->color);
+            DrawRectangleLines(rowX + 4, rowY + (rowH - 2) / 2 - 7, 14, 14,
+                               (Color){ 255, 255, 255, 30 });
+
+            // Item name
+            DrawText(def->name, rowX + 22, rowY + 5, 13, COL_UI_TEXT);
+            // Type
+            DrawText(def->categoryName, rowX + 22, rowY + 21, 11,
+                     (Color){ 160, 180, 160, 255 });
+
+            // Condition bar
+            int barX     = rowX + 22;
+            int barY     = rowY + 35;
+            int barMaxW  = 100;
+            int barH     = 7;
+            int barFillW = (int)(cond * barMaxW);
+            DrawRectangle(barX, barY, barMaxW, barH, (Color){ 40, 40, 56, 255 });
+            Color barColor;
+            if (cond < 0.5f)       barColor = (Color){ 200, 60, 60, 255 };
+            else if (cond < 0.8f)  barColor = (Color){ 220, 180, 40, 255 };
+            else                   barColor = (Color){ 60, 180, 80, 255 };
+            DrawRectangle(barX, barY, barFillW, barH, barColor);
+            DrawRectangleLines(barX, barY, barMaxW, barH, COL_UI_BORDER);
+
+            // Condition percentage
+            char pctBuf[8];
+            snprintf(pctBuf, sizeof(pctBuf), "%d%%", (int)(cond * 100.0f));
+            DrawText(pctBuf, barX + barMaxW + 4, barY - 1, 11, COL_UI_TEXT);
+
+            // TRADE label
+            if (cond >= 0.8f) {
+                DrawText("TRADE", rowX + invPanelW - 42, rowY + 5, 10,
+                         (Color){ 212, 165, 116, 255 });
+            }
+
+            // Click detection
+            if (clicked &&
+                mouse.x >= rowX && mouse.x < rowX + invPanelW &&
+                mouse.y >= rowY && mouse.y < rowY + rowH - 2) {
+                if (*repairSlot == i) {
+                    *repairSlot = -1;
+                } else if (*sacrificeSlot == i) {
+                    *sacrificeSlot = -1;
+                } else if (*repairSlot == -1 && i != *sacrificeSlot) {
+                    *repairSlot = i;
+                } else if (*sacrificeSlot == -1 && i != *repairSlot) {
+                    *sacrificeSlot = i;
+                }
+            }
+        } else {
+            DrawText("- empty -", rowX + 22, rowY + 17, 13,
+                     (Color){ 80, 76, 70, 255 });
+        }
+
+        // Row divider
+        DrawLine(rowX, rowY + rowH - 2, rowX + invPanelW, rowY + rowH - 2,
+                 (Color){ 255, 255, 255, 15 });
+    }
+
+    // ---------- CENTER PANEL: Repair / Sacrifice slots + preview ----------
+    int centerPanelX = panelX + 280;
+    int centerPanelW = 260;
+    int slotBoxW     = 200;
+    int slotBoxH     = 60;
+    int slotBoxX     = centerPanelX + (centerPanelW - slotBoxW) / 2;
+    int contentY     = panelY + 56;
+
+    // REPAIR SLOT
+    DrawText("REPAIR SLOT", slotBoxX, contentY, 14, (Color){ 212, 165, 116, 255 });
+    contentY += 18;
+    DrawRectangle(slotBoxX, contentY, slotBoxW, slotBoxH, (Color){ 20, 16, 12, 220 });
+    DrawRectangleLines(slotBoxX, contentY, slotBoxW, slotBoxH,
+                       (Color){ 120, 100, 80, 255 });
+
+    if (*repairSlot >= 0 && inventory[*repairSlot].occupied) {
+        const ItemTypeDef *rdef = &ITEM_TYPES[inventory[*repairSlot].typeIndex];
+        float rcond = inventory[*repairSlot].condition;
+        DrawRectangle(slotBoxX + 4, contentY + 6, 12, 12, rdef->color);
+        DrawText(rdef->name, slotBoxX + 20, contentY + 5, 12, COL_UI_TEXT);
+        DrawText(rdef->categoryName, slotBoxX + 20, contentY + 20, 10,
+                 (Color){ 160, 180, 160, 255 });
+        // Condition bar
+        int rb2X = slotBoxX + 20, rb2Y = contentY + 35;
+        int rb2W = 120, rb2H = 7;
+        DrawRectangle(rb2X, rb2Y, rb2W, rb2H, (Color){ 40, 40, 56, 255 });
+        Color rcol = (rcond < 0.5f) ? (Color){ 200, 60, 60, 255 } :
+                     (rcond < 0.8f) ? (Color){ 220, 180, 40, 255 } :
+                                      (Color){ 60, 180, 80, 255 };
+        DrawRectangle(rb2X, rb2Y, (int)(rcond * rb2W), rb2H, rcol);
+        DrawRectangleLines(rb2X, rb2Y, rb2W, rb2H, COL_UI_BORDER);
+        char rpct[8]; snprintf(rpct, sizeof(rpct), "%d%%", (int)(rcond * 100.0f));
+        DrawText(rpct, rb2X + rb2W + 4, rb2Y - 1, 10, COL_UI_TEXT);
+    } else {
+        DrawText("click item ->", slotBoxX + 10, contentY + 22, 13,
+                 (Color){ 100, 95, 88, 255 });
+    }
+    contentY += slotBoxH + 6;
+
+    // Arrow
+    DrawText("v", slotBoxX + slotBoxW / 2 - 4, contentY, 18,
+             (Color){ 160, 140, 110, 200 });
+    contentY += 22;
+
+    // SACRIFICE SLOT
+    DrawText("SACRIFICE SLOT", slotBoxX, contentY, 14, (Color){ 212, 165, 116, 255 });
+    contentY += 18;
+    DrawRectangle(slotBoxX, contentY, slotBoxW, slotBoxH, (Color){ 20, 16, 12, 220 });
+    DrawRectangleLines(slotBoxX, contentY, slotBoxW, slotBoxH,
+                       (Color){ 120, 100, 80, 255 });
+
+    if (*sacrificeSlot >= 0 && inventory[*sacrificeSlot].occupied) {
+        const ItemTypeDef *sdef = &ITEM_TYPES[inventory[*sacrificeSlot].typeIndex];
+        float scond = inventory[*sacrificeSlot].condition;
+        DrawRectangle(slotBoxX + 4, contentY + 6, 12, 12, sdef->color);
+        DrawText(sdef->name, slotBoxX + 20, contentY + 5, 12, COL_UI_TEXT);
+        DrawText(sdef->categoryName, slotBoxX + 20, contentY + 20, 10,
+                 (Color){ 160, 180, 160, 255 });
+        // Condition bar
+        int sb2X = slotBoxX + 20, sb2Y = contentY + 35;
+        int sb2W = 120, sb2H = 7;
+        DrawRectangle(sb2X, sb2Y, sb2W, sb2H, (Color){ 40, 40, 56, 255 });
+        Color scol = (scond < 0.5f) ? (Color){ 200, 60, 60, 255 } :
+                     (scond < 0.8f) ? (Color){ 220, 180, 40, 255 } :
+                                      (Color){ 60, 180, 80, 255 };
+        DrawRectangle(sb2X, sb2Y, (int)(scond * sb2W), sb2H, scol);
+        DrawRectangleLines(sb2X, sb2Y, sb2W, sb2H, COL_UI_BORDER);
+        char spct[8]; snprintf(spct, sizeof(spct), "%d%%", (int)(scond * 100.0f));
+        DrawText(spct, sb2X + sb2W + 4, sb2Y - 1, 10, COL_UI_TEXT);
+    } else {
+        DrawText("click item ->", slotBoxX + 10, contentY + 22, 13,
+                 (Color){ 100, 95, 88, 255 });
+    }
+    contentY += slotBoxH + 14;
+
+    // RESULT PREVIEW
+    DrawLine(slotBoxX, contentY, slotBoxX + slotBoxW, contentY,
+             (Color){ 212, 165, 116, 60 });
+    contentY += 8;
+    DrawText("RESULT PREVIEW", slotBoxX, contentY, 13, (Color){ 212, 165, 116, 255 });
+    contentY += 18;
+
+    bool bothFilled = (*repairSlot >= 0 && *sacrificeSlot >= 0 &&
+                       inventory[*repairSlot].occupied &&
+                       inventory[*sacrificeSlot].occupied);
+
+    if (bothFilled) {
+        ItemCategory repCat = ITEM_TYPES[inventory[*repairSlot].typeIndex].category;
+        ItemCategory sacCat = ITEM_TYPES[inventory[*sacrificeSlot].typeIndex].category;
+        bool typeMatch = (repCat == sacCat);
+        float bonus    = typeMatch ? (baseRepairBonus + 0.1f) : baseRepairBonus;
+        float newCond  = inventory[*repairSlot].condition + bonus;
+        if (newCond > 1.0f) newCond = 1.0f;
+
+        // Result condition bar
+        int prX = slotBoxX, prY = contentY;
+        int prW = slotBoxW, prH = 10;
+        DrawRectangle(prX, prY, prW, prH, (Color){ 40, 40, 56, 255 });
+        Color prCol = (newCond < 0.5f) ? (Color){ 200, 60, 60, 255 } :
+                      (newCond < 0.8f) ? (Color){ 220, 180, 40, 255 } :
+                                         (Color){ 60, 180, 80, 255 };
+        DrawRectangle(prX, prY, (int)(newCond * prW), prH, prCol);
+        DrawRectangleLines(prX, prY, prW, prH, COL_UI_BORDER);
+        char prPct[16];
+        snprintf(prPct, sizeof(prPct), "-> %d%%", (int)(newCond * 100.0f));
+        DrawText(prPct, prX, prY + 14, 13, COL_UI_TEXT);
+
+        if (typeMatch) {
+            char matchBuf[32];
+            snprintf(matchBuf, sizeof(matchBuf), "TYPE MATCH +%.2f", baseRepairBonus + 0.1f);
+            DrawText(matchBuf, prX, prY + 30, 12, (Color){ 100, 200, 100, 255 });
+        } else {
+            char bonusBuf[16];
+            snprintf(bonusBuf, sizeof(bonusBuf), "+%.2f", baseRepairBonus);
+            DrawText(bonusBuf, prX, prY + 30, 12, COL_UI_TEXT);
+        }
+    } else {
+        DrawText("select items", slotBoxX, contentY, 13,
+                 (Color){ 100, 95, 88, 255 });
+    }
+
+    // ---------- RIGHT PANEL: Buttons ----------
+    int rightPanelX = panelX + 660;
+    int rightPanelW = 220;
+    int btnX        = rightPanelX + (rightPanelW - 160) / 2;
+    int btnY        = panelY + 80;
+
+    // REPAIR BUTTON
+    bool canRepair = (bothFilled && *workbenchState == WB_OPEN);
+    Color repairBtnBg  = canRepair ? (Color){ 80,  140, 80,  220 } : (Color){ 40, 40, 40, 180 };
+    Color repairBtnBdr = canRepair ? (Color){ 120, 200, 120, 255 } : (Color){ 80, 80, 80, 255 };
+    Color repairBtnTxt = canRepair ? COL_ALMOST_WHITE                : (Color){ 100, 100, 100, 255 };
+
+    DrawRectangle(btnX, btnY, 160, 50, repairBtnBg);
+    DrawRectangleLines(btnX, btnY, 160, 50, repairBtnBdr);
+    int repairTxtW = MeasureText("REPAIR", 18);
+    DrawText("REPAIR", btnX + 80 - repairTxtW / 2, btnY + 16, 18, repairBtnTxt);
+
+    if (canRepair && clicked &&
+        mouse.x >= btnX && mouse.x < btnX + 160 &&
+        mouse.y >= btnY && mouse.y < btnY + 50) {
+        *workbenchState = WB_REPAIRING;
+        *repairTimer    = 0.0f;
+    }
+
+    btnY += 60;
+
+    // PROGRESS BAR (while repairing)
+    if (*workbenchState == WB_REPAIRING) {
+        DrawText("Repairing...", btnX, btnY, 12, COL_UI_DIM);
+        btnY += 16;
+        int pbX = btnX, pbY = btnY;
+        int pbW = 160, pbH = 20;
+        float progress = (*repairTimer >= 2.0f) ? 1.0f : (*repairTimer / 2.0f);
+        DrawRectangle(pbX, pbY, pbW, pbH, (Color){ 30, 30, 30, 255 });
+        DrawRectangle(pbX, pbY, (int)(progress * pbW), pbH, (Color){ 100, 200, 100, 255 });
+        DrawRectangleLines(pbX, pbY, pbW, pbH, (Color){ 212, 165, 116, 255 });
+        btnY += pbH + 10;
+    }
+
+    // CLOSE BUTTON (bottom right of panel)
+    int closeBtnX = panelX + panelW - 140;
+    int closeBtnY = panelY + panelH - 50;
+    DrawRectangle(closeBtnX, closeBtnY, 120, 36, (Color){ 60, 30, 20, 200 });
+    DrawRectangleLines(closeBtnX, closeBtnY, 120, 36, (Color){ 212, 165, 116, 255 });
+    int closeTxtW = MeasureText("CLOSE (ESC)", 12);
+    DrawText("CLOSE (ESC)", closeBtnX + 60 - closeTxtW / 2, closeBtnY + 12, 12,
+             COL_UI_TEXT);
+
+    // Close on ESC or close button click (only if not repairing)
+    if (*workbenchState != WB_REPAIRING) {
+        bool escPressed = IsKeyPressed(KEY_ESCAPE);
+        bool closeBtnClicked = (clicked &&
+                                mouse.x >= closeBtnX && mouse.x < closeBtnX + 120 &&
+                                mouse.y >= closeBtnY && mouse.y < closeBtnY + 36);
+        if (escPressed || closeBtnClicked) {
+            *workbenchState = WB_CLOSED;
+            *repairSlot     = -1;
+            *sacrificeSlot  = -1;
+            // small flash on close
+            *pickupFlashTimer = pickupFlashMax * 0.5f;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DrawDataLogViewer  (screen space)
+// Full-screen log reader for the 5 data logs.
+// ---------------------------------------------------------------------------
+void DrawDataLogViewer(int logIndex, bool *open)
+{
+    static const char *LOG_TITLES[5] = {
+        "Atmospheric Maintenance Report 7-4A",
+        "Infrastructure Requisition — DENIED",
+        "Personnel Transfer — Routine",
+        "Personal Note (Unsent)",
+        "Signal Analysis Fragment"
+    };
+
+    static const char *LOG_BODIES[5] = {
+        "SECTOR: Outer Basin / Classification: Routine\n\n"
+        "Cloud layer density within nominal parameters. Visibility threshold maintained at 0.0 — "
+        "no surface-to-upper deviation detected this cycle. Atmospheric processing units 14 "
+        "through 22 operating at 94% efficiency. Recommend scheduled maintenance on Unit 17 "
+        "(minor particulate accumulation).\n\n"
+        "Upper boundary integrity: confirmed stable. No unauthorized sensor activity in the outer "
+        "basin. Maintenance team deployment unnecessary at this time.\n\n"
+        "Note: Report filed automatically. No human review required.",
+
+        "REQUEST: Replacement relay components, Boundary Station 7-North. Submitted by: Field Engineer Osei.\n\n"
+        "DENIAL REASON: Non-essential infrastructure. Boundary relay stations are scheduled for "
+        "decommission per Directive 11 (see attached). Requisition does not meet threshold for approval.\n\n"
+        "Field Engineer Osei's note (attached): 'Station 7-North is still transmitting. I don't know "
+        "what it's picking up but the signal is not random noise. Decommission seems premature. "
+        "Requesting review.'\n\n"
+        "Review Status: CLOSED. No further action.",
+
+        "Employee: M. Yuen / Previous Post: Outer Basin Resource Allocation / New Post: Upper District, Sector 7\n\n"
+        "Transfer effective immediately. Standard relocation package applies. Employee has been briefed "
+        "on Upper District protocols and has signed the relevant agreements.\n\n"
+        "Note: Upper District assignments are non-transferable and non-revocable. Employee acknowledges "
+        "that contact with previous colleagues and family in the Outer Basin will be limited to approved "
+        "communication channels.\n\n"
+        "We wish M. Yuen well in their new role.\n\nHR Department — Automated Processing",
+
+        "I went back to the eastern ridge last night. I know I said I wouldn't.\n\n"
+        "The cloud wall was lower than I've ever seen it. For maybe thirty seconds I could see past it. "
+        "I keep trying to find the right word for the color. It wasn't the gray we have here, or the brown "
+        "of the basin. It was green. Not a little green. An impossible green, the kind you see in old "
+        "pictures of places that used to exist.\n\n"
+        "I told Petra and she said I was sunstruck. Maybe. But I wasn't. I know what I saw.\n\n"
+        "I'm going back. I'm bringing a recorder this time. If anyone finds this note and I don't come "
+        "back — I wasn't sunstruck.",
+
+        "SOURCE: Boundary Station 7-North (scheduled decommission, still active)\n"
+        "Signal type: structured radio transmission / Frequency: non-standard / Origin: ABOVE cloud layer\n\n"
+        "Pattern analysis: transmission follows recursive mathematical structure inconsistent with natural "
+        "phenomena. Repetition interval: 4.7 seconds. Signal has been present in archived data for at "
+        "least 11 years.\n\n"
+        "Conclusion: Signal is of deliberate origin. Source is located above the maintained cloud layer, "
+        "in a region officially designated as uninhabitable.\n\n"
+        "This analysis was not requested. I am filing it anyway.\n\n"
+        "— Station 7-North, automated relay. Engineer Osei, appended note."
+    };
+
+    if (logIndex < 0 || logIndex >= 5) { *open = false; return; }
+
+    int sw = GetScreenWidth();
+    int sh = GetScreenHeight();
+
+    // Very dark background
+    DrawRectangle(0, 0, sw, sh, (Color){ 8, 6, 4, 250 });
+
+    // Parchment-toned text panel
+    int panelW = 760;
+    int panelH = 560;
+    int panelX = sw / 2 - panelW / 2;
+    int panelY = sh / 2 - panelH / 2;
+
+    DrawRectangle(panelX, panelY, panelW, panelH, (Color){ 28, 22, 16, 255 });
+    DrawRectangleLines(panelX, panelY, panelW, panelH, (Color){ 212, 165, 116, 255 });
+
+    // Inner border
+    DrawRectangleLines(panelX + 4, panelY + 4, panelW - 8, panelH - 8,
+                       (Color){ 140, 100, 60, 80 });
+
+    // Log index badge
+    char badgeBuf[16];
+    snprintf(badgeBuf, sizeof(badgeBuf), "LOG %d/5", logIndex + 1);
+    DrawText(badgeBuf, panelX + 16, panelY + 14, 12, (Color){ 140, 100, 60, 200 });
+
+    // Title
+    const char *logTitle = LOG_TITLES[logIndex];
+    int titleFontSize = 18;
+    int titleW = MeasureText(logTitle, titleFontSize);
+    // If title is too wide, use smaller font
+    if (titleW > panelW - 40) titleFontSize = 14;
+    titleW = MeasureText(logTitle, titleFontSize);
+    DrawText(logTitle, panelX + panelW / 2 - titleW / 2, panelY + 14,
+             titleFontSize, (Color){ 212, 165, 116, 255 });
+
+    // Divider
+    DrawLine(panelX + 16, panelY + 42, panelX + panelW - 16, panelY + 42,
+             (Color){ 212, 165, 116, 100 });
+
+    // Body text — word-wrapped using DrawTextEx style with manual wrapping
+    // We'll draw the text using a simple manual word-wrap approach
+    const char *body = LOG_BODIES[logIndex];
+    int textX       = panelX + 20;
+    int textY       = panelY + 52;
+    int textMaxW    = panelW - 40;
+    int bodyFontSz  = 15;
+    int lineHeight  = bodyFontSz + 5;
+    int maxTextY    = panelY + panelH - 56; // leave room for close button
+
+    // Simple word-wrap: build line by line
+    char lineBuf[256];
+    int  lineLen = 0;
+    int  curY    = textY;
+
+    const char *p = body;
+    while (*p && curY < maxTextY) {
+        // Find next word or newline
+        if (*p == '\n') {
+            // Flush current line
+            if (lineLen > 0) {
+                lineBuf[lineLen] = '\0';
+                DrawText(lineBuf, textX, curY, bodyFontSz, (Color){ 232, 220, 200, 255 });
+            }
+            curY += lineHeight;
+            // Extra blank line on double-newline
+            if (*(p + 1) == '\n') {
+                curY += lineHeight / 2;
+                p++;
+            }
+            lineLen = 0;
+            p++;
+            continue;
+        }
+
+        // Find end of word
+        const char *wordStart = p;
+        while (*p && *p != ' ' && *p != '\n') p++;
+        int wordLen = (int)(p - wordStart);
+
+        // Check if adding word fits
+        char testBuf[256];
+        int  testLen = lineLen;
+        if (testLen > 0) { testBuf[testLen++] = ' '; }
+        for (int wi = 0; wi < wordLen && testLen < 254; wi++) {
+            testBuf[testLen++] = wordStart[wi];
+        }
+        testBuf[testLen] = '\0';
+
+        int testW = MeasureText(testBuf, bodyFontSz);
+        if (testW > textMaxW && lineLen > 0) {
+            // Flush current line and start new
+            lineBuf[lineLen] = '\0';
+            DrawText(lineBuf, textX, curY, bodyFontSz, (Color){ 232, 220, 200, 255 });
+            curY += lineHeight;
+            // Start new line with current word
+            lineLen = 0;
+            for (int wi = 0; wi < wordLen && lineLen < 254; wi++) {
+                lineBuf[lineLen++] = wordStart[wi];
+            }
+        } else {
+            // Add to line
+            if (lineLen > 0 && lineLen < 254) lineBuf[lineLen++] = ' ';
+            for (int wi = 0; wi < wordLen && lineLen < 254; wi++) {
+                lineBuf[lineLen++] = wordStart[wi];
+            }
+        }
+
+        // Skip trailing space
+        if (*p == ' ') p++;
+    }
+    // Flush remaining line
+    if (lineLen > 0 && curY < maxTextY) {
+        lineBuf[lineLen] = '\0';
+        DrawText(lineBuf, textX, curY, bodyFontSz, (Color){ 232, 220, 200, 255 });
+    }
+
+    // CLOSE button at bottom
+    int closeBtnW = 120;
+    int closeBtnH = 36;
+    int closeBtnX = panelX + panelW / 2 - closeBtnW / 2;
+    int closeBtnY = panelY + panelH - closeBtnH - 12;
+
+    Vector2 mouse = GetMousePosition();
+    bool clicked  = IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
+
+    bool hoverClose = (mouse.x >= closeBtnX && mouse.x < closeBtnX + closeBtnW &&
+                       mouse.y >= closeBtnY && mouse.y < closeBtnY + closeBtnH);
+    Color closeBg  = hoverClose ? (Color){ 70, 50, 30, 230 } : (Color){ 40, 30, 18, 200 };
+
+    DrawRectangle(closeBtnX, closeBtnY, closeBtnW, closeBtnH, closeBg);
+    DrawRectangleLines(closeBtnX, closeBtnY, closeBtnW, closeBtnH,
+                       (Color){ 212, 165, 116, 255 });
+    int closeTW = MeasureText("CLOSE", 16);
+    DrawText("CLOSE", closeBtnX + closeBtnW / 2 - closeTW / 2, closeBtnY + 10, 16,
+             (Color){ 232, 224, 216, 255 });
+
+    if (IsKeyPressed(KEY_ESCAPE) || (clicked && hoverClose)) {
+        *open = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DrawTradeScreenUI  (screen space, called after EndMode2D)
+// ---------------------------------------------------------------------------
+void DrawTradeScreenUI(InventorySlot *inventory, int maxInventory,
+                       int *tokenCount, bool *tradeScreenOpen,
+                       int *dataLogsPurchased, bool *toolUpgradePurchased,
+                       bool *carryUpgradePurchased, int *maxInventoryPtr,
+                       float *baseRepairBonusPtr, float *tokenAnimTimer,
+                       int *tokenAnimDelta, int *selectedTradeSlot,
+                       bool *dataLogViewerOpen, int *dataLogViewerIndex)
+{
+    int sw = GetScreenWidth();
+    int sh = GetScreenHeight();
+
+    // Full-screen dark overlay
+    DrawRectangle(0, 0, sw, sh, (Color){ 10, 8, 6, 200 });
+
+    // Panel
+    int panelW = 940;
+    int panelH = 580;
+    int panelX = sw / 2 - panelW / 2;
+    int panelY = sh / 2 - panelH / 2;
+
+    DrawRectangle(panelX, panelY, panelW, panelH, (Color){ 20, 16, 28, 245 });
+    DrawRectangleLines(panelX, panelY, panelW, panelH, (Color){ 212, 165, 116, 255 });
+    // Second inner border (2px)
+    DrawRectangleLines(panelX + 2, panelY + 2, panelW - 4, panelH - 4,
+                       (Color){ 212, 165, 116, 60 });
+
+    // Title
+    const char *title = "CITY GATE — EXCHANGE";
+    int titleFontSz   = 22;
+    int titleW        = MeasureText(title, titleFontSz);
+    DrawText(title, panelX + panelW / 2 - titleW / 2, panelY + 14,
+             titleFontSz, (Color){ 212, 165, 116, 255 });
+
+    // Subtitle
+    const char *sub = "Trade goods for visitor tokens. Tokens buy access.";
+    int subW = MeasureText(sub, 12);
+    DrawText(sub, panelX + panelW / 2 - subW / 2, panelY + 42,
+             12, (Color){ 140, 130, 120, 255 });
+
+    // Horizontal divider below title
+    DrawLine(panelX + 16, panelY + 58, panelX + panelW - 16, panelY + 58,
+             (Color){ 212, 165, 116, 80 });
+
+    bool clicked = IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
+    Vector2 mouse = GetMousePosition();
+
+    // ----------------------------------------------------------------
+    // LEFT PANEL: Inventory (x+16, width 260)
+    // ----------------------------------------------------------------
+    int leftX  = panelX + 16;
+    int leftW  = 260;
+    int leftY  = panelY + 66;
+
+    DrawText("YOUR GOODS", leftX, leftY, 14, (Color){ 212, 165, 116, 255 });
+    leftY += 20;
+
+    int rowH  = 48;
+    int iRowW = leftW;
+
+    for (int i = 0; i < maxInventory; i++) {
+        int rowX = leftX;
+        int rowY = leftY + i * rowH;
+
+        // Row background
+        DrawRectangle(rowX, rowY, iRowW, rowH - 2, (Color){ 26, 20, 14, 200 });
+
+        if (inventory[i].occupied) {
+            const ItemTypeDef *def  = &ITEM_TYPES[inventory[i].typeIndex];
+            float cond              = inventory[i].condition;
+            bool  tradeable         = (cond >= 0.8f);
+            bool  isSelected        = (*selectedTradeSlot == i);
+
+            // Highlight
+            if (isSelected) {
+                DrawRectangle(rowX, rowY, iRowW, rowH - 2, (Color){ 60, 50, 10, 120 });
+                DrawRectangleLines(rowX, rowY, iRowW, rowH - 2,
+                                   (Color){ 255, 215, 0, 255 });
+            } else if (tradeable) {
+                DrawRectangleLines(rowX, rowY, iRowW, rowH - 2,
+                                   (Color){ 212, 165, 116, 180 });
+            }
+
+            // Color swatch
+            Color swatchCol = tradeable ? def->color : (Color){ def->color.r / 2, def->color.g / 2, def->color.b / 2, 180 };
+            DrawRectangle(rowX + 4, rowY + rowH / 2 - 6, 12, 12, swatchCol);
+
+            // Item name
+            Color nameCol = tradeable ? (Color){ 232, 224, 216, 255 } : (Color){ 120, 115, 108, 255 };
+            DrawText(def->name, rowX + 20, rowY + 6, 13, nameCol);
+
+            // Condition bar
+            int barX  = rowX + 20;
+            int barY  = rowY + 22;
+            int barW  = 120;
+            int barH  = 6;
+            int barFW = (int)(cond * barW);
+            DrawRectangle(barX, barY, barW, barH, (Color){ 30, 30, 40, 255 });
+            Color barCol = tradeable ? (Color){ 60, 200, 80, 255 } :
+                           (cond >= 0.5f) ? (Color){ 200, 180, 40, 200 } :
+                                            (Color){ 180, 50, 50, 200 };
+            DrawRectangle(barX, barY, barFW, barH, barCol);
+            DrawRectangleLines(barX, barY, barW, barH, (Color){ 80, 70, 60, 255 });
+
+            // Percentage
+            char pctBuf[8];
+            snprintf(pctBuf, sizeof(pctBuf), "%d%%", (int)(cond * 100.0f));
+            DrawText(pctBuf, barX + barW + 4, barY - 2, 11, nameCol);
+
+            // TRADE badge
+            if (tradeable) {
+                int badgeX = rowX + iRowW - 44;
+                int badgeY = rowY + rowH / 2 - 8;
+                DrawRectangle(badgeX, badgeY, 40, 16, (Color){ 60, 45, 10, 200 });
+                DrawRectangleLines(badgeX, badgeY, 40, 16, (Color){ 212, 165, 116, 255 });
+                DrawText("TRADE", badgeX + 2, badgeY + 3, 10, (Color){ 212, 165, 116, 255 });
+
+                // Clickable
+                if (clicked && mouse.x >= rowX && mouse.x < rowX + iRowW &&
+                    mouse.y >= rowY && mouse.y < rowY + rowH - 2) {
+                    *selectedTradeSlot = (*selectedTradeSlot == i) ? -1 : i;
+                }
+            }
+        } else {
+            DrawText("- empty -", rowX + 20, rowY + rowH / 2 - 7, 12,
+                     (Color){ 70, 66, 60, 255 });
+        }
+
+        // Row divider
+        DrawLine(rowX, rowY + rowH - 2, rowX + iRowW, rowY + rowH - 2,
+                 (Color){ 255, 255, 255, 12 });
+    }
+
+    // Hint below list
+    int hintY = leftY + maxInventory * rowH + 4;
+    DrawText("Select a trade good to offer", leftX, hintY, 11,
+             (Color){ 120, 115, 108, 255 });
+
+    // ----------------------------------------------------------------
+    // CENTER PANEL: Token counter + TRADE button (x+292, width 200)
+    // ----------------------------------------------------------------
+    int centerX  = panelX + 292;
+    int centerW  = 200;
+    int centerY  = panelY + 66;
+
+    // "VISITOR TOKENS" header
+    const char *tokHeader = "VISITOR TOKENS";
+    int tokHW = MeasureText(tokHeader, 14);
+    DrawText(tokHeader, centerX + centerW / 2 - tokHW / 2, centerY,
+             14, (Color){ 212, 165, 116, 255 });
+    centerY += 24;
+
+    // Coin
+    int coinCX = centerX + centerW / 2;
+    int coinCY = centerY + 40;
+    float coinR = (*tokenAnimTimer > 0.0f) ? 32.0f : 28.0f;
+
+    // Coin shadow
+    DrawCircle(coinCX + 2, coinCY + 2, (int)coinR, (Color){ 0, 0, 0, 60 });
+    // Coin body
+    DrawCircle(coinCX, coinCY, (int)coinR, (Color){ 255, 215, 0, 230 });
+    DrawCircleLines(coinCX, coinCY, (int)coinR, (Color){ 200, 160, 40, 255 });
+    // Inner ring
+    DrawCircleLines(coinCX, coinCY, (int)coinR - 4, (Color){ 180, 140, 30, 120 });
+
+    // Token count inside coin
+    char tkBuf[8];
+    snprintf(tkBuf, sizeof(tkBuf), "%d", *tokenCount);
+    int tkFontSz = 28;
+    int tkW = MeasureText(tkBuf, tkFontSz);
+    DrawText(tkBuf, coinCX - tkW / 2, coinCY - tkFontSz / 2, tkFontSz,
+             (Color){ 40, 26, 8, 255 });
+
+    // Floating +/- anim
+    if (*tokenAnimTimer > 0.0f) {
+        float progress = 1.0f - (*tokenAnimTimer / 0.4f);
+        int floatY = coinCY - (int)coinR - 10 - (int)(progress * 24.0f);
+        unsigned char fa = (unsigned char)((1.0f - progress) * 220.0f);
+        const char *deltaStr = (*tokenAnimDelta > 0) ? "+1" : "-1";
+        Color deltaCol = (*tokenAnimDelta > 0) ?
+            (Color){ 100, 230, 100, fa } : (Color){ 230, 100, 100, fa };
+        int dtW = MeasureText(deltaStr, 16);
+        DrawText(deltaStr, coinCX - dtW / 2, floatY, 16, deltaCol);
+    }
+
+    // Divider below coin
+    int divY = coinCY + (int)coinR + 12;
+    DrawLine(centerX + 10, divY, centerX + centerW - 10, divY,
+             (Color){ 212, 165, 116, 60 });
+    divY += 14;
+
+    // TRADE button
+    int tradeBtnW = 160;
+    int tradeBtnH = 44;
+    int tradeBtnX = centerX + centerW / 2 - tradeBtnW / 2;
+    int tradeBtnY = divY;
+
+    bool hasSelected = (*selectedTradeSlot >= 0 &&
+                        *selectedTradeSlot < maxInventory &&
+                        inventory[*selectedTradeSlot].occupied &&
+                        inventory[*selectedTradeSlot].condition >= 0.8f);
+
+    bool hoverTrade = (mouse.x >= tradeBtnX && mouse.x < tradeBtnX + tradeBtnW &&
+                       mouse.y >= tradeBtnY && mouse.y < tradeBtnY + tradeBtnH);
+
+    Color tradeBtnBg  = hasSelected ?
+        (Color){ 60 + (hoverTrade ? 20 : 0), 120 + (hoverTrade ? 20 : 0), 60, 220 } :
+        (Color){ 30, 28, 26, 180 };
+    Color tradeBtnBdr = hasSelected ? (Color){ 100, 200, 100, 255 } : (Color){ 60, 56, 50, 255 };
+
+    DrawRectangle(tradeBtnX, tradeBtnY, tradeBtnW, tradeBtnH, tradeBtnBg);
+    DrawRectangleLines(tradeBtnX, tradeBtnY, tradeBtnW, tradeBtnH, tradeBtnBdr);
+
+    const char *tradeBtnLabel = hasSelected ? "TRADE ITEM" : "SELECT A TRADE GOOD";
+    int tradeLblFontSz = hasSelected ? 15 : 10;
+    int tradeLblW = MeasureText(tradeBtnLabel, tradeLblFontSz);
+    Color tradeLblCol = hasSelected ? (Color){ 232, 240, 232, 255 } : (Color){ 90, 86, 80, 255 };
+    DrawText(tradeBtnLabel,
+             tradeBtnX + tradeBtnW / 2 - tradeLblW / 2,
+             tradeBtnY + tradeBtnH / 2 - tradeLblFontSz / 2,
+             tradeLblFontSz, tradeLblCol);
+
+    // Trade action
+    if (hasSelected && clicked && hoverTrade) {
+        // Remove item from inventory
+        inventory[*selectedTradeSlot].occupied   = false;
+        inventory[*selectedTradeSlot].condition  = 0.0f;
+        // Give token
+        (*tokenCount)++;
+        *tokenAnimTimer = 0.4f;
+        *tokenAnimDelta = 1;
+        *selectedTradeSlot = -1;
+    }
+
+    // ----------------------------------------------------------------
+    // RIGHT PANEL: Shop (x+508, width 416)
+    // ----------------------------------------------------------------
+    int shopX = panelX + 508;
+    int shopW = 416;
+    int shopY = panelY + 66;
+
+    const char *shopHeader = "AVAILABLE";
+    int shopHW = MeasureText(shopHeader, 14);
+    DrawText(shopHeader, shopX + shopW / 2 - shopHW / 2, shopY,
+             14, (Color){ 212, 165, 116, 255 });
+    shopY += 22;
+
+    int cardW = 390;
+    int cardH = 68;
+    int cardX = shopX + (shopW - cardW) / 2;
+
+    // --- DATA LOG card ---
+    {
+        int cardY = shopY;
+        bool mouseOver = (mouse.x >= cardX && mouse.x < cardX + cardW &&
+                          mouse.y >= cardY && mouse.y < cardY + cardH);
+        bool complete  = (*dataLogsPurchased >= 5);
+        int  logCost   = 2 + *dataLogsPurchased;
+        bool canAfford = (!complete && *tokenCount >= logCost);
+
+        Color cardBg  = mouseOver ? (Color){ 40, 34, 28, 220 } : (Color){ 30, 24, 20, 200 };
+        Color cardBdr = canAfford ? (Color){ 212, 165, 116, 255 } : (Color){ 80, 70, 60, 255 };
+
+        DrawRectangle(cardX, cardY, cardW, cardH, cardBg);
+        DrawRectangleLines(cardX, cardY, cardW, cardH, cardBdr);
+
+        // Title
+        char logTitle[32];
+        snprintf(logTitle, sizeof(logTitle), "Data Log [%d/5]", *dataLogsPurchased);
+        DrawText(logTitle, cardX + 10, cardY + 8, 14, (Color){ 232, 224, 210, 255 });
+
+        // Description teaser
+        static const char *LOG_TEASERS[5] = {
+            "Routine atmospheric report — nothing unusual.",
+            "A denied requisition. The engineer added a note.",
+            "A personnel transfer. The fine print is worth reading.",
+            "Someone went to the ridge. They saw something green.",
+            "A signal from above the clouds. It has been there for years."
+        };
+        const char *teaser = (complete) ? "All logs recovered." :
+                             LOG_TEASERS[*dataLogsPurchased];
+        DrawText(teaser, cardX + 10, cardY + 26, 11, (Color){ 140, 130, 118, 255 });
+
+        // Cost or COMPLETE
+        if (complete) {
+            DrawText("ARCHIVE COMPLETE", cardX + 10, cardY + 46, 12,
+                     (Color){ 100, 180, 100, 255 });
+        } else {
+            // Coin icon + cost
+            int costCoinX = cardX + 10 + 8;
+            int costCoinY = cardY + cardH - 16;
+            DrawCircle(costCoinX, costCoinY, 8, (Color){ 255, 215, 0, 200 });
+            DrawCircleLines(costCoinX, costCoinY, 8, (Color){ 200, 160, 40, 255 });
+            char costBuf[8];
+            snprintf(costBuf, sizeof(costBuf), "%d", logCost);
+            int cstW = MeasureText(costBuf, 11);
+            DrawText(costBuf, costCoinX - cstW / 2, costCoinY - 5, 11,
+                     (Color){ 40, 26, 8, 255 });
+            DrawText("tokens", cardX + 30, cardY + cardH - 21, 11,
+                     (Color){ 170, 160, 140, 255 });
+
+            // BUY button
+            int buyBtnW = 80;
+            int buyBtnH = 32;
+            int buyBtnX = cardX + cardW - buyBtnW - 8;
+            int buyBtnY = cardY + cardH / 2 - buyBtnH / 2;
+
+            bool hoverBuy = (mouse.x >= buyBtnX && mouse.x < buyBtnX + buyBtnW &&
+                             mouse.y >= buyBtnY && mouse.y < buyBtnY + buyBtnH);
+            Color buyBg  = canAfford ? (hoverBuy ? (Color){ 70, 55, 20, 230 } :
+                                                    (Color){ 50, 38, 12, 200 }) :
+                                       (Color){ 30, 28, 24, 160 };
+            Color buyBdr = canAfford ? (Color){ 212, 165, 116, 255 } :
+                                       (Color){ 60, 56, 50, 180 };
+            Color buyTxt = canAfford ? (Color){ 212, 165, 116, 255 } :
+                                       (Color){ 80, 76, 70, 255 };
+
+            DrawRectangle(buyBtnX, buyBtnY, buyBtnW, buyBtnH, buyBg);
+            DrawRectangleLines(buyBtnX, buyBtnY, buyBtnW, buyBtnH, buyBdr);
+            int buyTW = MeasureText("BUY", 14);
+            DrawText("BUY", buyBtnX + buyBtnW / 2 - buyTW / 2, buyBtnY + 9, 14, buyTxt);
+
+            if (canAfford && clicked && hoverBuy) {
+                *tokenCount -= logCost;
+                *tokenAnimTimer = 0.4f;
+                *tokenAnimDelta = -1;
+                // Open the newly purchased log
+                *dataLogViewerIndex = *dataLogsPurchased;
+                (*dataLogsPurchased)++;
+                *dataLogViewerOpen = true;
+            }
+        }
+    }
+
+    // --- TOOL UPGRADE card ---
+    {
+        int cardY = shopY + cardH + 8;
+        bool mouseOver = (mouse.x >= cardX && mouse.x < cardX + cardW &&
+                          mouse.y >= cardY && mouse.y < cardY + cardH);
+        bool purchased  = *toolUpgradePurchased;
+        int  toolCost   = 3;
+        bool canAfford  = (!purchased && *tokenCount >= toolCost);
+
+        Color cardBg  = mouseOver ? (Color){ 40, 34, 28, 220 } : (Color){ 30, 24, 20, 200 };
+        Color cardBdr = canAfford ? (Color){ 212, 165, 116, 255 } : (Color){ 80, 70, 60, 255 };
+
+        DrawRectangle(cardX, cardY, cardW, cardH, cardBg);
+        DrawRectangleLines(cardX, cardY, cardW, cardH, cardBdr);
+
+        DrawText("Repair Tools", cardX + 10, cardY + 8, 14, (Color){ 232, 224, 210, 255 });
+        DrawText("Improves repair efficiency. Base gain +0.25", cardX + 10, cardY + 26, 11,
+                 (Color){ 140, 130, 118, 255 });
+
+        if (purchased) {
+            DrawText("INSTALLED", cardX + 10, cardY + 46, 12, (Color){ 100, 200, 100, 255 });
+        } else {
+            // Coin + cost
+            int costCoinX = cardX + 10 + 8;
+            int costCoinY = cardY + cardH - 16;
+            DrawCircle(costCoinX, costCoinY, 8, (Color){ 255, 215, 0, 200 });
+            DrawCircleLines(costCoinX, costCoinY, 8, (Color){ 200, 160, 40, 255 });
+            int ctW = MeasureText("3", 11);
+            DrawText("3", costCoinX - ctW / 2, costCoinY - 5, 11,
+                     (Color){ 40, 26, 8, 255 });
+            DrawText("tokens", cardX + 30, cardY + cardH - 21, 11,
+                     (Color){ 170, 160, 140, 255 });
+
+            int buyBtnW = 80, buyBtnH = 32;
+            int buyBtnX = cardX + cardW - buyBtnW - 8;
+            int buyBtnY = cardY + cardH / 2 - buyBtnH / 2;
+            bool hoverBuy = (mouse.x >= buyBtnX && mouse.x < buyBtnX + buyBtnW &&
+                             mouse.y >= buyBtnY && mouse.y < buyBtnY + buyBtnH);
+            Color buyBg  = canAfford ? (hoverBuy ? (Color){ 70, 55, 20, 230 } :
+                                                    (Color){ 50, 38, 12, 200 }) :
+                                       (Color){ 30, 28, 24, 160 };
+            Color buyBdr = canAfford ? (Color){ 212, 165, 116, 255 } : (Color){ 60, 56, 50, 180 };
+            Color buyTxt = canAfford ? (Color){ 212, 165, 116, 255 } : (Color){ 80, 76, 70, 255 };
+            DrawRectangle(buyBtnX, buyBtnY, buyBtnW, buyBtnH, buyBg);
+            DrawRectangleLines(buyBtnX, buyBtnY, buyBtnW, buyBtnH, buyBdr);
+            int buyTW = MeasureText("BUY", 14);
+            DrawText("BUY", buyBtnX + buyBtnW / 2 - buyTW / 2, buyBtnY + 9, 14, buyTxt);
+
+            if (canAfford && clicked && hoverBuy) {
+                *tokenCount -= toolCost;
+                *tokenAnimTimer = 0.4f;
+                *tokenAnimDelta = -1;
+                *toolUpgradePurchased = true;
+                *baseRepairBonusPtr   = 0.25f;
+            }
+        }
+    }
+
+    // --- CARRY UPGRADE card ---
+    {
+        int cardY = shopY + (cardH + 8) * 2;
+        bool mouseOver = (mouse.x >= cardX && mouse.x < cardX + cardW &&
+                          mouse.y >= cardY && mouse.y < cardY + cardH);
+        bool purchased  = *carryUpgradePurchased;
+        int  carryCost  = 4;
+        bool canAfford  = (!purchased && *tokenCount >= carryCost);
+
+        Color cardBg  = mouseOver ? (Color){ 40, 34, 28, 220 } : (Color){ 30, 24, 20, 200 };
+        Color cardBdr = canAfford ? (Color){ 212, 165, 116, 255 } : (Color){ 80, 70, 60, 255 };
+
+        DrawRectangle(cardX, cardY, cardW, cardH, cardBg);
+        DrawRectangleLines(cardX, cardY, cardW, cardH, cardBdr);
+
+        DrawText("Pack Upgrade", cardX + 10, cardY + 8, 14, (Color){ 232, 224, 210, 255 });
+        DrawText("Increases carry capacity to 10 items", cardX + 10, cardY + 26, 11,
+                 (Color){ 140, 130, 118, 255 });
+
+        if (purchased) {
+            DrawText("INSTALLED", cardX + 10, cardY + 46, 12, (Color){ 100, 200, 100, 255 });
+        } else {
+            // Coin + cost
+            int costCoinX = cardX + 10 + 8;
+            int costCoinY = cardY + cardH - 16;
+            DrawCircle(costCoinX, costCoinY, 8, (Color){ 255, 215, 0, 200 });
+            DrawCircleLines(costCoinX, costCoinY, 8, (Color){ 200, 160, 40, 255 });
+            int ctW = MeasureText("4", 11);
+            DrawText("4", costCoinX - ctW / 2, costCoinY - 5, 11,
+                     (Color){ 40, 26, 8, 255 });
+            DrawText("tokens", cardX + 30, cardY + cardH - 21, 11,
+                     (Color){ 170, 160, 140, 255 });
+
+            int buyBtnW = 80, buyBtnH = 32;
+            int buyBtnX = cardX + cardW - buyBtnW - 8;
+            int buyBtnY = cardY + cardH / 2 - buyBtnH / 2;
+            bool hoverBuy = (mouse.x >= buyBtnX && mouse.x < buyBtnX + buyBtnW &&
+                             mouse.y >= buyBtnY && mouse.y < buyBtnY + buyBtnH);
+            Color buyBg  = canAfford ? (hoverBuy ? (Color){ 70, 55, 20, 230 } :
+                                                    (Color){ 50, 38, 12, 200 }) :
+                                       (Color){ 30, 28, 24, 160 };
+            Color buyBdr = canAfford ? (Color){ 212, 165, 116, 255 } : (Color){ 60, 56, 50, 180 };
+            Color buyTxt = canAfford ? (Color){ 212, 165, 116, 255 } : (Color){ 80, 76, 70, 255 };
+            DrawRectangle(buyBtnX, buyBtnY, buyBtnW, buyBtnH, buyBg);
+            DrawRectangleLines(buyBtnX, buyBtnY, buyBtnW, buyBtnH, buyBdr);
+            int buyTW = MeasureText("BUY", 14);
+            DrawText("BUY", buyBtnX + buyBtnW / 2 - buyTW / 2, buyBtnY + 9, 14, buyTxt);
+
+            if (canAfford && clicked && hoverBuy) {
+                *tokenCount -= carryCost;
+                *tokenAnimTimer = 0.4f;
+                *tokenAnimDelta = -1;
+                *carryUpgradePurchased = true;
+                *maxInventoryPtr       = 10;
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // CLOSE BUTTON (bottom center of panel)
+    // ----------------------------------------------------------------
+    int closeBtnW = 140;
+    int closeBtnH = 36;
+    int closeBtnX = panelX + panelW / 2 - closeBtnW / 2;
+    int closeBtnY = panelY + panelH - closeBtnH - 12;
+
+    bool hoverClose = (mouse.x >= closeBtnX && mouse.x < closeBtnX + closeBtnW &&
+                       mouse.y >= closeBtnY && mouse.y < closeBtnY + closeBtnH);
+    Color closeBg  = hoverClose ? (Color){ 60, 30, 20, 230 } : (Color){ 40, 24, 16, 200 };
+
+    DrawRectangle(closeBtnX, closeBtnY, closeBtnW, closeBtnH, closeBg);
+    DrawRectangleLines(closeBtnX, closeBtnY, closeBtnW, closeBtnH,
+                       (Color){ 212, 165, 116, 255 });
+    const char *closeLbl = "CLOSE (ESC)";
+    int closeLblW = MeasureText(closeLbl, 13);
+    DrawText(closeLbl, closeBtnX + closeBtnW / 2 - closeLblW / 2, closeBtnY + 11, 13,
+             (Color){ 232, 224, 216, 255 });
+
+    if (IsKeyPressed(KEY_ESCAPE) ||
+        (clicked && hoverClose)) {
+        *tradeScreenOpen  = false;
+        *selectedTradeSlot = -1;
     }
 }
