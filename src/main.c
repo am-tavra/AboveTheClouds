@@ -1721,10 +1721,11 @@ void DrawVillage(float pulseTimer, bool isNight, float shadowOffsetX, float shad
 // ---------------------------------------------------------------------------
 void DrawCityGate(CityBuildings *cityBuildings, float pulseTimer, bool isNight, Texture2D gateSpr)
 {
+    (void)gateSpr;
     Vector2 villageCenter = { WORLD_WIDTH / 2.0f, WORLD_HEIGHT / 2.0f };
     Vector2 gatePos       = { villageCenter.x + 200, villageCenter.y };
 
-    // City background buildings at varying heights (drawn behind sprite)
+    // City background buildings at varying heights
     Color cityColors[3] = { COL_CITY_A, COL_CITY_B, COL_CITY_C };
     for (int i = 0; i < NUM_CITY_BUILDINGS; i++) {
         int bx = (int)(gatePos.x + 80 + i * 28);
@@ -1734,32 +1735,27 @@ void DrawCityGate(CityBuildings *cityBuildings, float pulseTimer, bool isNight, 
         DrawRectangleLines(bx, by, 18, bh, (Color){ 26, 32, 44, 255 });
     }
 
-    // Ground integration — dirt path leading to gate
-    DrawEllipse((int)gatePos.x + 30, (int)gatePos.y + 10,
-                90, 18, (Color){ 190, 160, 120, 80 });
-    // Compacted earth base under gate pillars
-    DrawEllipse((int)gatePos.x + 30, (int)gatePos.y + 8,
-                60, 10, (Color){ 170, 140, 100, 120 });
-    // Gate shadow on the ground
-    DrawEllipse((int)gatePos.x + 30, (int)gatePos.y + 12,
-                50, 8, (Color){ 0, 0, 0, 40 });
-
-    // Draw city gate sprite — bottom of sprite aligned to gatePos.y
-    float spriteScale = 200.0f / (float)gateSpr.width; // scale to ~200px wide
-    float spriteW = gateSpr.width  * spriteScale;
-    float spriteH = gateSpr.height * spriteScale;
-    Rectangle src  = { 0, 0, (float)gateSpr.width, (float)gateSpr.height };
-    // Anchor bottom of sprite to ground level
-    Rectangle dest = { gatePos.x - spriteW * 0.5f, gatePos.y - spriteH + 20.0f,
-                       spriteW, spriteH };
-    DrawTexturePro(gateSpr, src, dest, (Vector2){0, 0}, 0.0f, WHITE);
-
-    // Keep pillar positions for pulse effects (approximate from sprite placement)
-    int pillarW      = 20;
-    int pillarH      = 80;
+    // Gate pillar dimensions
+    int pillarW = 20;
+    int pillarH = 80;
     int leftPillarX  = (int)(gatePos.x - 10);
     int rightPillarX = (int)(gatePos.x + 50);
     int pillarY      = (int)(gatePos.y - 60);
+
+    // Pillars
+    DrawRectangle(leftPillarX,  pillarY, pillarW, pillarH, COL_GATE_PILLAR);
+    DrawRectangle(rightPillarX, pillarY, pillarW, pillarH, COL_GATE_PILLAR);
+    DrawRectangleLines(leftPillarX,  pillarY, pillarW, pillarH, (Color){ 40, 50, 64, 255 });
+    DrawRectangleLines(rightPillarX, pillarY, pillarW, pillarH, (Color){ 40, 50, 64, 255 });
+
+    // Horizontal bar at top
+    DrawRectangle(leftPillarX, pillarY - 10,
+                  rightPillarX - leftPillarX + pillarW, 10, COL_GATE_BAR);
+
+    // Base scanner line
+    DrawRectangle(leftPillarX, pillarY + pillarH,
+                  rightPillarX - leftPillarX + pillarW, 3,
+                  (Color){ 96, 165, 250, 64 });
 
     // Pulsing blue light stripe - brighter at night
     float lightPulse = sinf(pulseTimer * (2.0f * PI / 1.5f)) * 0.5f + 0.5f; // 0..1
